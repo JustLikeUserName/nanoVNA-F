@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/img">
+        <file>img/soochowuniversity.jpg</file>
+    </qresource>
+</RCC>
