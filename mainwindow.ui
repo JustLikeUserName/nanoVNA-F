@@ -317,10 +317,17 @@
            </property>
           </widget>
          </item>
-         <item row="4" column="0" colspan="2">
+         <item row="4" column="1">
           <widget class="QPushButton" name="pbSaveImage">
            <property name="text">
-            <string>save image</string>
+            <string>save Chart image</string>
+           </property>
+          </widget>
+         </item>
+         <item row="4" column="0">
+          <widget class="QPushButton" name="pbSaveUIImage">
+           <property name="text">
+            <string>save UI image</string>
            </property>
           </widget>
          </item>

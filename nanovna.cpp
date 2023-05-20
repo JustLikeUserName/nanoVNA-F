@@ -12,7 +12,7 @@ NanoVNA::NanoVNA(QString comName)
     this->setParity(settings.parity);
     this->setStopBits(settings.stopBits);
     this->setFlowControl(settings.flowControl);
-    vnaLog.init(QString("vnaLog.txt"));
+    vnaLog.init(QString("vnaLog"));
 }
 
 NanoVNA::NanoVNA(QString comName, NanoVNA::SerialPortSetting settings)

@@ -1,115 +1,112 @@
 ﻿#include "mainwindow.h"
 #include "ui_mainwindow.h"
-#include <QValidator>
-#include <QDateTime>
+#include <QSerialPortInfo>
 #include <QMessageBox>
-#include <QStringListModel>
-#include <QDebug>
-#include <QFile>
-#include <QTextStream>
-#include <QThread>
+#include <cmath>
+#include <QScreen>
+#include <QFileDialog>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    this->setWindowState(Qt::WindowMaximized);
-    QString str;
-    str = "传输线理论计算器";
-    this->setWindowTitle(str);
-    QPixmap img(":/image/basic"); //图片已经存入资源文件
-    ui->labelImg->setText("");
-    ui->labelImg->setPixmap(img);
-    ui->labelImg->setScaledContents(true);
-    ui->tabWidget->setCurrentIndex(0);
+    isVnaOpened = false;
+    pVna = nullptr;
     setSelfValidator();
-    setConfig();
-    initList();
-    initChartPainter();
-    setMouseTracking(false);
+    availableSerialDevice();
+    initChart();
+    initTimer();
+    log.init("vnaErrorLog");
+    this->setWindowTitle(QString("NanoVNA F2应用"));
+    this->setWindowState(Qt::WindowMaximized);
 }
 
 MainWindow::~MainWindow()
 {
-    if(pPainter)
-        delete pPainter;
-    if(pImg)
-        delete pImg;
-    if(pPainter4Basic)
-        delete  pPainter4Basic;
-    if(pImg4Basic)
-        delete pImg4Basic;
-    if(pPainter4QuarnterLamda)
-        delete pPainter4QuarnterLamda;
-    for(int i=0;i<2;++i)
-    {
-        if(pPainter4SeriesStub[i])
-            delete pPainter4SeriesStub[i];
-        if(pImg4SeriesStub[i])
-            delete pImg4SeriesStub[i];
-    }
-    for(int i=0;i<4;++i)
-    {
-        if(pPainter4PStub[i])
-            delete pPainter4PStub[i];
-        if(pImg4PStub[i])
-            delete pImg4PStub[i];
-    }
     delete ui;
-}
-
-void MainWindow::clearInputs()
-{
-    qDebug("Users clear all input parameters\n");
-    ui->leZ0->setText("");
-    ui->leZl_real->setText("");
-    ui->leZl_img->setText("");
-    ui->leFreq ->setText("");
-    ui->leDist->setText("");
-    ui->chbZin->setCheckState(Qt::Unchecked);
-    ui->chbRCoef->setCheckState(Qt::Unchecked);
-    ui->chbVswr->setCheckState(Qt::Unchecked);
-    resList1.clear();
-    model1.setStringList(resList1);
+    if(pVna)
+        pVna->deleteLater();
+    if(pS11Callout)
+        delete pS11Callout;
+    if(pS21Callout)
+        delete pS21Callout;
 }
 
 void MainWindow::setSelfValidator()
 {
-    QRegExp regx("^[-]?[0-9]*[.]?[0-9]*");
-    QValidator* pValidator= new QRegExpValidator(regx,this);
-    ui->leZ0->setValidator(pValidator);
-    ui->leDist->setValidator(pValidator);
-    ui->leFreq->setValidator(pValidator);
-    ui->leZl_img->setValidator(pValidator);
-    ui->leZl_real->setValidator(pValidator);
-
-    ui->le_z0->setValidator(pValidator);
-    ui->le_Freq->setValidator(pValidator);
-    ui->le_zlR->setValidator(pValidator);
-    ui->le_zlim->setValidator(pValidator);
-
-    ui->leZ0_Series->setValidator(pValidator);
-    ui->leFreq_Series->setValidator(pValidator);
-    ui->leZl_real_Series->setValidator(pValidator);
-    ui->leZl_img_Series->setValidator(pValidator);
-
-    ui->leZ0_Parallel->setValidator(pValidator);
-    ui->leFreq_Parallel->setValidator(pValidator);
-    ui->leZl_real_Parallel->setValidator(pValidator);
-    ui->leZl_img_Parallel->setValidator(pValidator);
+    QRegExp regx("^[1-9]?[0-9]*");
+    QRegExpValidator validator(regx,this);
+    ui->leStartFreq->setValidator(&validator);
+    ui->leStopFreq->setValidator(&validator);
 }
 
-void MainWindow::showWarning(const QString msg)
+void MainWindow::availableSerialDevice()
 {
-    QMessageBox::warning(this,"警告",msg);
-    ui->statusbar->showMessage(msg);
-    return;
+    /*****搜索所有可用串口*****/
+    foreach (const QSerialPortInfo &inf0, QSerialPortInfo::availablePorts())
+    {
+        ui->cbSerialportName->addItem(inf0.portName());
+    }
+    ui->cbBaudrate->addItem("9600");
+    ui->cbBaudrate->addItem("115200");
+    ui->cbSerialportName->setCurrentIndex(0);
+    ui->cbBaudrate->setCurrentIndex(0);
 }
 
-void MainWindow::closeEvent(QCloseEvent* e)
+void MainWindow::initChart()
 {
-    //QMessageBox::Button bt =QMessageBox::question(this,"警告","退出软件？",QMessageBox::Ok|QMessageBox::No);
+    s11Series.setName("S11");
+    //s11Series.setColor(Qt::yellow);
+    s21Series.setName("S21");
+    //s21Series.setColor(Qt::cyan);
+    sParameterChart.addSeries(&s11Series);
+    sParameterChart.addSeries(&s21Series);
+    sParameterChart.createDefaultAxes();
+    sParameterChart.axisX()->setTitleText("freq(Hz)");
+    sParameterChart.axisY()->setTitleText("dB");
+    //sParameterChart.setBackgroundBrush(Qt::black);
+    ui->chart->setChart(&sParameterChart);
+    pS11Callout = new Callout(&sParameterChart);
+    pS11Callout->hide();
+    connect(&s11Series,SIGNAL(hovered(const QPointF , bool )),this,SLOT(on_s11SeriesHovered(const QPointF, bool)));
+    pS21Callout = new Callout(&sParameterChart);
+    pS21Callout->hide();
+    connect(&s21Series,SIGNAL(hovered(const QPointF , bool )),this,SLOT(on_s21SeriesHovered(const QPointF, bool)));
+}
+
+void MainWindow::initTimer()
+{
+    timer.setInterval(500);
+    connect(&timer,SIGNAL(timeout()),this,SLOT(onTimerOut()));
+}
+
+bool MainWindow::initVNA(QString comName,QString baudRate)
+{
+    if(!pVna)
+        pVna = new NanoVNA(comName);
+    pVna->setPortName(comName);
+    pVna->setBaudRate(baudRate.toInt());
+    bool res=true;
+    if(isVnaOpened)
+    {
+        pVna->clear();
+        pVna->close();
+    }
+    res = pVna->OpenVNA();
+    if(res)
+    {
+        isVnaOpened = true;
+        ui->statusbar->showMessage(QString("nanoVNA-F V2已连接成功"));
+        vnaStatus = None;
+        connect(pVna,SIGNAL(readyRead()),this,SLOT(onVnaReadyRead()));
+        connect(pVna, &QSerialPort::errorOccurred, this, &MainWindow::onVnaError);
+    }
+    return res;
+}
+
+void MainWindow::closeEvent(QCloseEvent *e)
+{
     int bt =QMessageBox::question(this,"警告","退出软件？",QMessageBox::Ok|QMessageBox::No,QMessageBox::Ok);
     if(bt == QMessageBox::Ok)
         e->accept();
@@ -117,2587 +114,644 @@ void MainWindow::closeEvent(QCloseEvent* e)
         e->ignore();
 }
 
-void MainWindow::setConfig()
+
+void MainWindow::on_pbConnect_clicked()
 {
-    QFile* pFile = new QFile("./parameters.cfg");
-    if(pFile->open(QIODevice::ReadOnly))
+    bool res;
+    res = initVNA(ui->cbSerialportName->currentText(),ui->cbBaudrate->currentText());
+    if(!res)
+       QMessageBox::warning(this,QString("警告"),QString("连接网分仪失败，请检查是否正确连线，谢谢！"));
+}
+
+void MainWindow::on_pbDisConnect_clicked()
+{
+    if(isVnaOpened)
     {
-        QTextStream infile(pFile);
-        double z0,freq,d,zl_re,zl_im;
-        infile>>z0>>d;
-        infile>>freq;
-        infile>>zl_re>>zl_im;
-        // Tab 1
-        ui->leZ0->setText(QString("%1").arg(z0));
-        ui->leDist->setText(QString("%1").arg(d));
-        ui->leFreq->setText(QString("%1").arg(freq));
-        ui->leZl_real->setText(QString("%1").arg(zl_re));
-        ui->leZl_img->setText(QString("%1").arg(zl_im));
-        // Tab 2
-        ui->le_z0->setText(QString("%1").arg(z0));
-        ui->le_Freq->setText(QString("%1").arg(freq));
-        ui->le_zlR->setText(QString("%1").arg(zl_re));
-        ui->le_zlim->setText(QString("%1").arg(zl_im));
-        // Tab 3
-        ui->leZ0_Series->setText(QString("%1").arg(z0));
-        ui->leFreq_Series->setText(QString("%1").arg(freq));
-        ui->leZl_real_Series->setText(QString("%1").arg(zl_re));
-        ui->leZl_img_Series->setText(QString("%1").arg(zl_im));
-        // Tab 4
-        ui->leZ0_Parallel->setText(QString("%1").arg(z0));
-        ui->leFreq_Parallel->setText(QString("%1").arg(freq));
-        ui->leZl_real_Parallel->setText(QString("%1").arg(zl_re));
-        ui->leZl_img_Parallel->setText(QString("%1").arg(zl_im));
+        pVna->clearError();
+        pVna->clear();
+        pVna->close();
+        isVnaOpened = false;
+        ui->statusbar->showMessage(QString("nanoVNA-F V2断开连接"));
+    }
+}
+
+void MainWindow::on_pbConfig_clicked()
+{
+    if(isVnaOpened)
+    {
+        if(ui->leStartFreq->text().isEmpty() || ui->leStopFreq->text().isEmpty())
+        {
+            QMessageBox::warning(this,QString("警告"),QString("起始频率/截止频率设置不能为空，谢谢！"));
+            return;
+        }
+        quint32 startFreq = ui->leStartFreq->text().toInt();
+        quint32 stopFreq = ui->leStopFreq->text().toInt();
+        quint32 sweepPoints;
+        sweepPoints = ui->cbSweepPoints->currentText().toInt();
+        int retValue = pVna->CfgVNA(startFreq,stopFreq,sweepPoints);
+        if(retValue == -1)
+            ui->statusbar->showMessage(QString("配置nanoVNA-F V2失败"));
+        else
+            ui->statusbar->showMessage(QString("配置nanoVNA-F V2成功"));
     }
     else
-        showWarning("不能找到parameters.cfg文件");
-    if(pFile)
+       QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbOpenCal_clicked()
+{
+    NanoVNA::CMD4CAL calCmd;
+    calCmd = NanoVNA::CMD4CAL::OPEN;
+    if(isVnaOpened)
     {
-        pFile->close();
-        pFile->deleteLater();
+        QMessageBox::information(this,"提示信息",QString("端口1和端口2连接开路负载，按确定键进行开路校准"));
+        pVna->Calibrate(calCmd);
+        ui->textNote->append(QString("完成开路校准"));
+    }
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbShortCal_clicked()
+{
+    NanoVNA::CMD4CAL calCmd;
+    calCmd = NanoVNA::CMD4CAL::SHORT;
+    if(isVnaOpened)
+    {
+        QMessageBox::information(this,"提示信息",QString("端口1和端口2连接短路负载，按确定键进行短路校准"));
+        pVna->Calibrate(calCmd);
+        ui->textNote->append(QString("完成短路校准"));
+    }
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbLoadCal_clicked()
+{
+    NanoVNA::CMD4CAL calCmd;
+    calCmd = NanoVNA::CMD4CAL::LOAD;
+    if(isVnaOpened)
+    {
+        QMessageBox::information(this,"提示信息",QString("端口1和端口2连接匹配负载，按确定键进行匹配校准"));
+        pVna->Calibrate(calCmd);
+        ui->textNote->append(QString("完成匹配校准"));
+    }
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbThruCal_clicked()
+{
+    NanoVNA::CMD4CAL calCmd;
+    calCmd = NanoVNA::CMD4CAL::THRU;
+    if(isVnaOpened)
+    {
+        QMessageBox::information(this,"提示信息",QString("端口1和端口2连接直通接头（THRU），按确定键进行直通校准"));
+        pVna->Calibrate(calCmd);
+       ui->textNote->append(QString("完成直通校准"));
+    }
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbDoneCal_clicked()
+{
+    NanoVNA::CMD4CAL calCmd;
+    calCmd = NanoVNA::CMD4CAL::DONE;
+    if(isVnaOpened)
+    {
+        pVna->Calibrate(calCmd);
+        ui->textNote->append(QString("已确认当前校准！"));
+    }
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbResetCal_clicked()
+{
+    NanoVNA::CMD4CAL calCmd;
+    calCmd = NanoVNA::CMD4CAL::RESET;
+    if(isVnaOpened)
+    {
+        int bt =QMessageBox::question(this,"警告","放弃当前校准？",QMessageBox::Ok|QMessageBox::No,QMessageBox::Ok);
+        if(bt == QMessageBox::Ok)
+        {
+            pVna->Calibrate(calCmd);
+            ui->textNote->clear();
+        }
+    }
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
+}
+
+void MainWindow::on_pbSingleStep_clicked()
+{
+    NanoVNA::CMD4SParameters sParameter;
+    if(ui->chbS11->isChecked() && ui->chbS21->isChecked())
+    {
+        sParameter = NanoVNA::S11AndS21;
+        vnaStatus = S11AndS21;
+    }
+    else if(ui->chbS11->isChecked())
+    {
+        sParameter = NanoVNA::S11;
+        vnaStatus = S11;
+    }
+    else if(ui->chbS21)
+    {
+        sParameter = NanoVNA::S21;
+        vnaStatus = S21;
+    }
+    else
+    {
+        QMessageBox::warning(this,QString("警告"),QString("请勾选测量选项，谢谢！"));
+        vnaStatus = None;
+        return;
+    }
+    if(isVnaOpened)
+    {
+        quint32 startFreq = ui->leStartFreq->text().toUInt();
+        quint32 stopFreq = ui->leStopFreq->text().toUInt();
+        quint32 sweepPoints = ui->cbSweepPoints->currentText().toUInt();
+        pVna->SParametersTest(startFreq,stopFreq,sweepPoints,sParameter);
+    }
+    else
+    {
+        vnaStatus = None;
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
     }
 }
 
-void MainWindow::initList()
+void MainWindow::on_pbRun_clicked()
 {
-    model1.setStringList(resList1);
-    model4.setStringList(resList4);
-    model2.setStringList(resList2);
-    model3.setStringList(resList3);
-    ui->listResult->setModel(&model1);
-    ui->ls_res->setModel(&model2);
-    ui->listResult_Series->setModel(&model3);
-    ui->listResult_Parallel->setModel(&model4);
-    model_y.setStringList(strList_y);
-    model_z.setStringList(strList_z);
-    strList_z.append(QString("阻抗圆图求解步骤说明"));
-    strList_y.append(QString("导纳圆图求解步骤说明"));
-    model_y.setStringList(strList_y);
-    model_z.setStringList(strList_z);
-    strList2_z.append(QString("阻抗圆图求解步骤说明"));
-    strList2_y.append(QString("导纳圆图求解步骤说明"));
-    model2_y.setStringList(strList2_y);
-    model2_z.setStringList(strList2_z);
-    ui->list_Parallel_1->setModel(&model_z);
-    ui->list_Parallel_2->setModel(&model_y);
-    ui->list_Parallel_3->setModel(&model2_z);
-    ui->list_Parallel_4->setModel(&model2_y);
-
-    //SmithChart Section
-    // the information of help
-    strList_z.append("*************利用阻抗圆图求解（双击圆图，可以一步步演示做图求解过程）*******************");
-    strList_z.append(QString("1. 求出终端负载的归一化阻抗，然后绘制电阻圆和电抗圆"));
-    strList_z.append(QString("2. 找到终端负载电阻圆和电抗圆的交点，过交点绘制出终端负载的反射系数圆"));
-    strList_z.append(QString("3. 由于采用并联枝节，其导纳才符合“+”性，因此需要利用阻抗与导纳相位差180°的关系\n \
-                             将阻抗圆图视作导纳圆图，因此需要沿该反射系数圆旋转180°绘制出导纳圆图上等效的终端负载其电导圆和电纳圆的交点"));
-    strList_z.append(QString("4. 绘制电导为1的匹配圆，找到并标记处其与终端负载的反射系数圆的交点（一般会有2个）"));
-    strList_z.append(QString("5. 从负载位置向电源方向转到与匹配圆的2个交点（对应两组解），所转过的长度即为并联单枝节加入位置"));
-    strList_z.append(QString("6. 若已选中一个与匹配圆相交的一个交点，则绘制出过该点的电纳，读取其对应的归一化电纳值"));
-    strList_z.append(QString("7. 为了抵消该归一化电纳，绘制出与之取反的电纳值所对应的电纳圆，并绘制出其与反射系数为1的圆的交点"));
-    strList_z.append(QString("8. 沿反射系数为1的反射系数圆将该交点旋转180°，逆向等效转换到阻抗圆图，并绘制该等效的枝节长度对应交点"));
-    strList_z.append(QString("9. 从短路点（开路点）沿向电源方向转到该交点，其转过的长度即对应的短路（开路）枝节长度"));
-    strList_z.append(QString("10. 其对应的两组解的求解做图过程请查阅上侧的对应的两个解的SmithChart。"));
-    strList_z.append("******************************************************************************");
-    model_z.setStringList(strList_z);
-
-    strList2_z.append("*************利用阻抗圆图求解（双击圆图，可以一步步演示做图求解过程）****************");
-    strList2_z.append(QString("1. 求出终端负载的归一化阻抗，然后绘制电阻圆和电抗圆"));
-    strList2_z.append(QString("2. 找到终端负载电阻圆和电抗圆的交点，过交点绘制出终端负载的反射系数圆"));
-    strList2_z.append(QString("3. 由于采用并联枝节，其导纳才符合“+”性，因此需要利用阻抗与导纳相位差180°的关系\n \
-                             将阻抗圆图视作导纳圆图，因此需要沿该反射系数圆旋转180°绘制出导纳圆图上等效的终端负载其电导圆和电纳圆的交点"));
-    strList2_z.append(QString("4. 绘制电导为1的匹配圆，找到并标记处其与终端负载的反射系数圆的交点（一般会有2个）"));
-    strList2_z.append(QString("5. 从负载位置向电源方向转到与匹配圆的2个交点（对应两组解），所转过的长度即为并联单枝节加入位置"));
-    strList2_z.append(QString("6. 若已选中一个与匹配圆相交的一个交点，则绘制出过该点的电纳，读取其对应的归一化电纳值"));
-    strList2_z.append(QString("7. 为了抵消该归一化电纳，绘制出与之取反的电纳值所对应的电纳圆，并绘制出其与反射系数为1的圆的交点"));
-    strList2_z.append(QString("8. 沿反射系数为1的反射系数圆将该交点旋转180°，逆向等效转换到阻抗圆图，并绘制该等效的枝节长度对应交点"));
-    strList2_z.append(QString("9. 从短路点（开路点）沿向电源方向转到该交点，其转过的长度即对应的短路（开路）枝节长度"));
-    strList2_z.append(QString("10. 其对应的两组解的求解做图过程请查阅上侧的对应的两个解的SmithChart。"));
-    strList2_z.append("******************************************************************************");
-    model2_z.setStringList(strList2_z);
-
-    strList_y.append("**************利用导纳圆图求解（双击圆图，可以一步步演示做图求解过程）*****************");
-    strList_y.append(QString("1. 由于采用并联枝节，其导纳符合“+”性，可以直接求出终端负载的归一化导纳，然后绘制电导圆和电纳圆"));
-    strList_y.append(QString("2. 找到终端负载电导圆和电纳圆的交点，过交点绘制出终端负载的反射系数圆"));
-    strList_y.append(QString("3. 绘制电导为1的匹配圆，找到并标记处其与终端负载的反射系数圆的交点（一般会有2个）"));
-    strList_y.append(QString("4. 从负载位置向电源方向转到与匹配圆的2个交点（对应两组解），所转过的长度即为并联单枝节加入位置"));
-    strList_y.append(QString("5. 若已选中一个与电导为1的匹配圆相交的一个交点，则绘制出过该点的电纳，读取其对应的归一化电纳值"));
-    strList_y.append(QString("6. 为了抵消该归一化电纳，绘制出与之取反的电纳值所对应的电纳圆，并绘制出其与反射系数为1的圆的交点"));
-    strList_y.append(QString("7. 从短路点（开路点）沿向电源方向转到该交点，其转过的长度即对应的短路（开路）枝节长度"));
-    strList_y.append(QString("8. 其对应的两组解的求解做图过程请查阅上侧的对应的两个解的SmithChart。"));
-    strList_y.append("******************************************************************************");
-    model_y.setStringList(strList_z);
-
-    strList2_y.append("**************利用导纳圆图求解（双击圆图，可以一步步演示做图求解过程）*****************");
-    strList2_y.append(QString("1. 由于采用并联枝节，其导纳符合“+”性，可以直接求出终端负载的归一化导纳，然后绘制电导圆和电纳圆"));
-    strList2_y.append(QString("2. 找到终端负载电导圆和电纳圆的交点，过交点绘制出终端负载的反射系数圆"));
-    strList2_y.append(QString("3. 绘制电导为1的匹配圆，找到并标记处其与终端负载的反射系数圆的交点（一般会有2个）"));
-    strList2_y.append(QString("4. 从负载位置向电源方向转到与匹配圆的2个交点（对应两组解），所转过的长度即为并联单枝节加入位置"));
-    strList2_y.append(QString("5. 若已选中一个与电导为1的匹配圆相交的一个交点，则绘制出过该点的电纳，读取其对应的归一化电纳值"));
-    strList2_y.append(QString("6. 为了抵消该归一化电纳，绘制出与之取反的电纳值所对应的电纳圆，并绘制出其与反射系数为1的圆的交点"));
-    strList2_y.append(QString("7. 从短路点（开路点）沿向电源方向转到该交点，其转过的长度即对应的短路（开路）枝节长度"));
-    strList2_y.append(QString("8. 其对应的两组解的求解做图过程请查阅上侧的对应的两个解的SmithChart。"));
-    strList2_y.append("******************************************************************************");
-    model2_y.setStringList(strList2_z);
+    if(isVnaOpened)
+        timer.start();
+    else
+        QMessageBox::warning(this,QString("警告"),QString("请先连接仪器，谢谢！"));
 }
 
-void MainWindow::initChartPainter()
+void MainWindow::on_pbStop_clicked()
 {
-    qint32 width,height;
-    height = imgHeight;
-    width = height;
-    pImg = new QPixmap(height,width);
-    pPainter = new QPainter(pImg);
-    pPainter->translate(width/2,height/2);
-    SmithChart smithchart(height-80,width-80);
-    smithchart.setPainter(pPainter);
-    smithchart.drawSmithChart();
-//    smithchart.drawOpenPoint();
-//    smithchart.drawShortPoint();
-//    smithchart.drawMatchPoint();
-    //SmithChart for Resistor
-    ui->label_SmithImage->setPixmap(*pImg);
-    ui->label_BasicSmithChart->setPixmap(*pImg);
-    ui->label_BasicSmithChart->setScaledContents(true);
-    ui->label_quanterLamdaSmithChart->setPixmap(*pImg);
-    ui->label_SingleStubSsmithChart->setPixmap(*pImg);
-    ui->label_SingleStubSsmithChart->setScaledContents(true);
-    ui->label_SingleStubSsmithChart_2->setPixmap(*pImg);
-    ui->label_SingleStubSsmithChart_2->setScaledContents(true);
-    ui->toolBox->setCurrentIndex(0);
-    ui->label_SingleStubPsmithChart_1->setPixmap(*pImg);
-    ui->label_SingleStubPsmithChart_1->setScaledContents(true);
-    ui->label_SingleStubPsmithChart_3->setPixmap(*pImg);
-    ui->label_SingleStubPsmithChart_3->setScaledContents(true);
-    //Smithchart for g
-    smithchart.drawSmithChart_2();
-    ui->label_SmithImage_2->setPixmap(*pImg);
-    ui->label_SingleStubPsmithChart_2->setPixmap(*pImg);
-    ui->label_SingleStubPsmithChart_2->setScaledContents(true);
-    ui->label_SingleStubPsmithChart_4->setPixmap(*pImg);
-    ui->label_SingleStubPsmithChart_4->setScaledContents(true);
-    ui->toolBox_2->setCurrentIndex(0);
-    //for DoubleClick
-    pImg4Basic = nullptr;
-    pPainter4Basic = nullptr;
-    step4Base = 0;
-    pImg4QuarnterLamda = nullptr;
-    pPainter4QuarnterLamda = nullptr;
-    step4QuarnterLamda = 0;
-    for(int i=0;i<2;++i)
+    timer.stop();
+}
+
+void MainWindow::on_pbSaveImage_clicked()
+{
+    QPixmap pixmap;
+    QScreen *screen=QGuiApplication::primaryScreen();
+    pixmap =screen->grabWindow(ui->chart->winId());
+    QImage image = pixmap.toImage();
+    QString fileName = QFileDialog::getSaveFileName
+            (this,"Save Image","./","JPEG Files(*.jpg);PNG Files(*.png)");
+    if(fileName.trimmed()!="")
     {
-        pImg4PStub[i]=nullptr;
-        pPainter4PStub[i]=nullptr;
-        step4PStub[i]=0;
+        pixmap.save(fileName);
+        ui->statusbar->showMessage("save file:"+fileName,60);
     }
-    for(int i=0;i<4;++i)
+    else
     {
-        pImg4PStub[i] = nullptr;
-        pPainter4PStub[i] = nullptr;
-        step4PStub[i] = 0;
+        ui->statusbar->showMessage("please input filename! ",60);
     }
 }
 
-//void MainWindow::mouseMoveEvent(QMouseEvent *event)
-//{
-//    if(event->buttons()&Qt::LeftButton)
-//    {
-//        QPointF p1 = event->localPos();
-//        qDebug()<<"p1="<<p1;
-//        QPointF p2 = event->globalPos();
-//        qDebug()<<"p2="<<p2;
-//        QPointF p3 = event->pos();
-//        qDebug()<<"p3="<<p3;
-//        QPointF p4 = event->screenPos();
-//        qDebug()<<"p4="<<p4;
-//        QPointF p5 = event->windowPos();
-//        qDebug()<<"p5="<<p5;
-//    }
-//    else
-//    {
-
-//    }
-//}
-
-
-void MainWindow::on_pbClear_clicked()
+void MainWindow::onVnaReadyRead()
 {
-    clearInputs();
-}
-
-void MainWindow::on_pbCount_clicked()
-{
-    if(ui->chbZin->isChecked()||ui->chbVswr->isChecked()||ui->chbRCoef->isChecked())
+    QByteArray ba = pVna->readAll();
+    QString str(ba);
+    retMsg+=str;
+    if(retMsg.contains("ch>") && retMsg.contains("scan"))
     {
-        if(ui->leZ0->text().isEmpty())
-        {
-            showWarning("请输入传输线的特性阻抗");
-            return;
-        }
-        if(ui->leFreq->text().isEmpty())
-        {
-            showWarning("请输入传输线的工作频率");
-            return;
-        }
-        if(ui->leDist->text().isEmpty())
-        {
-            showWarning("请输入距离终端负载的距离");
-            return;
-        }
-        if(ui->leZl_real->text().isEmpty())
-        {
-            showWarning("请输入传输线的终端负载的实部");
-            return;
-        }
-        if(ui->leZl_real->text().isEmpty())
-        {
-            showWarning("请输入传输线的终端负载的虚部");
-            return;
-        }
-        double z0=ui->leZ0->text().toDouble();
-        Complex zl(ui->leZl_real->text().toDouble(),ui->leZl_img->text().toDouble());
-        double freq = ui->leFreq->text().toDouble()*1000000;//转换成Hz
-        double d = ui->leDist->text().toDouble();
-        double v = 300000000;//相速
-        //TransmissionLine tl(z0,zl,v/freq);
-        TransmissionLine tl(z0,zl,v/freq);
-        //qDebug("传输线特性阻抗：%f\t工作频率:%f\t终端负载阻抗：%f+j%f\t距离终端负载距离：%fm \n",z0,freq,zl.getReal(),zl.getImag(),d);
-        //显示输出结果的StringList
-        //QStringList strList;  //只能显示当前的计算结果，如何显示历史结果呢？=》保留上一次的strList信息，即strList的声明周期不能局限在这个函数中
+        int pos1 = retMsg.indexOf("scan"); //S tes's cmd
+        int pos2 = retMsg.indexOf("ch>");
         QString str;
-        str.sprintf("传输线特性阻抗：%f\t工作频率:%f\t终端负载阻抗：%f+j%f\t距离终端负载距离：%fm",z0,freq,zl.getReal(),zl.getImag(),d);
-        resList1.append(str);
-        str = QString("公式计算结果:");
-        resList1.append(str);
-        Complex zin;
-        if(ui->chbZin->isChecked())
+        while (pos2<pos1 && pos2!=-1)
         {
-            zin = tl.calZin(d);
-            qDebug("在距离终端负载%fm处的输入阻抗为%f+j%f \n",d,zin.getReal(),zin.getImag());
-            str.sprintf("在距离终端负载%fm处的输入阻抗为%f+j%f ",d,zin.getReal(),zin.getImag());
-            resList1.append(str);
+            str = retMsg.mid(pos1);
+            pos2 = str.indexOf("ch>");
+            retMsg = str;
         }
-        Complex rc;
-        if(ui->chbRCoef->isChecked())
+        QString msg;
+        if(pos2>pos1) //pos1至少是0
         {
-            rc = tl.calRflectCoef(d);
-            qDebug("在距离终端负载%fm处的反射系数为%f+j%f \n",d,rc.getReal(),rc.getImag());
-            //QString str=QString("在距离终端负载%1m处的反射系数为%2+j%3 \n").arg(d).arg(rc.getReal()).arg(rc.getImag());
-            qDebug() << QString("在距离终端负载%1m处的反射系数为%2+j%3").arg(d).arg(rc.getReal()).arg(rc.getImag());
+            msg=retMsg.mid(pos1,pos2);
+            //Analyzing retMsg
+            int N;//扫频点数
+            N = ui->cbSweepPoints->currentText().toInt();//获取扫频点数
+            //QStringList list = str.split('\n');//N个点，应该是N行
+            double freq[102];//定义频率参数
+            double s11_real[102];//定义s11实部
+            double s11_im[102];//定义s11虚部
+            double s21_real[102];//定义s11实部
+            double s21_im[102];//定义s11虚部
+            double s11Amplitude[102];
+            double s21Amplitude[102];
+            QStringList dataList = retMsg.split('\n');
+            //dada error
+            if(dataList.length() < N)
+            {
+                log.writeWithTime(QString("retMsgLen = %1  and N=%2\n retMsg=\n").arg(dataList.length()).arg(N));
+                log.write(retMsg);
+                retMsg.clear();
+                return;
+            }
+            retMsg.clear();
+            if(vnaStatus == ReadStatus::S11AndS21)
+            {
+                for(int i=1;i<N+1;++i)
+                {
+                    QStringList list2 = dataList.at(i).split(' ');//是空格分隔
+                    if(list2.length()>=5)
+                    {
+                        freq[i-1] = list2.at(0).toDouble();
+                        if(freq[i-1]<freq[0])
+                            return;
+                        s11_real[i-1]=list2.at(1).toDouble();
+                        s11_im[i-1]=list2.at(2).toDouble();
+                        s21_real[i-1]=list2.at(3).toDouble();
+                        s21_im[i-1]=list2.at(4).toDouble();
+                    }
+                    else
+                    {
+                       return;
+                    }
+                }
+                double max = 0; double min = 0;
+                for (int i = 0; i < N; ++i)
+                {
+                    s11Amplitude[i] =20*0.5*log10(s11_real[i] * s11_real[i] + s11_im[i] * s11_im[i]);
+                    s21Amplitude[i] = 20*0.5*log10(s21_real[i] * s21_real[i] + s21_im[i] * s21_im[i]);
+                    if (max<s11Amplitude[i])
+                        max = s11Amplitude[i];
+                    if (min>s11Amplitude[i])
+                        min = s11Amplitude[i];
+                    if (max<s21Amplitude[i])
+                        max = s21Amplitude[i];
+                    if (min>s21Amplitude[i])
+                        min = s21Amplitude[i];                    
+                }
 
-            str.sprintf("在距离终端负载%fm处的反射系数为%f+j%f ",d,rc.getReal(),rc.getImag());
-            resList1.append(str);
+                sParameterChart.axisX()->setRange(freq[0],freq[N-1]);
+                sParameterChart.axisY()->setRange(min*1.5,10);
+                s11Series.clear();
+                s21Series.clear();
+                for(int i=0;i<N;++i)
+                {
+                    s11Series.append(freq[i],s11Amplitude[i]);
+                    s21Series.append(freq[i],s21Amplitude[i]);
+                    //log.write(QString("Data: i=%1\tS11=%2\tS21=%3\tFreq=%4").arg(i).arg(s11Amplitude[i]).arg(s21Amplitude[i]).arg(freq[i]));
+                }
+                vnaStatus=ReadStatus::None;
+            }
+            else if(vnaStatus == S21)
+            {
+                for(int i=1;i<N+1;++i)
+                {
+                    QStringList list2 = dataList.at(i).split(' ');//是空格分隔
+                    if(list2.length()>=3)
+                    {
+                        freq[i-1] = list2.at(0).toDouble();
+                        if(freq[i-1]<freq[0])
+                            return;
+                        s21_real[i-1]=list2.at(1).toDouble();
+                        s21_im[i-1]=list2.at(2).toDouble();
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+                double max = 0; double min = 0;
+                for (int i = 0; i < N; ++i)
+                {
+                    s21Amplitude[i] =20*0.5*log10(s21_real[i] * s21_real[i] + s21_im[i] * s21_im[i]);
+                    s21Amplitude[i] =20*0.5*log10(s21_real[i] * s21_real[i] + s21_im[i] * s21_im[i]);
+                    if (max<s21Amplitude[i])
+                        max = s21Amplitude[i];
+                    if (min>s21Amplitude[i])
+                        min = s21Amplitude[i];
+                }
+
+                sParameterChart.axisX()->setRange(freq[0],freq[N-1]);
+                sParameterChart.axisY()->setRange(min*1.5,10);
+                s11Series.clear();
+                s21Series.clear();
+                for(int i=0;i<N;++i)
+                {
+                    s21Series.append(freq[i],s21Amplitude[i]);
+                }
+                vnaStatus=ReadStatus::None;
+            }
+            else if(vnaStatus == S11)
+            {
+                for(int i=1;i<N+1;++i)
+                {
+                    QStringList list2 = dataList.at(i).split(' ');//是空格分隔
+                    if(list2.length()>=3)
+                    {
+                        freq[i-1] = list2.at(0).toDouble();
+                        if(freq[i-1]<freq[0])
+                            return;
+                        s11_real[i-1]=list2.at(1).toDouble();
+                        s11_im[i-1]=list2.at(2).toDouble();
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+                double max = 0; double min = 0;
+                for (int i = 0; i < N; ++i)
+                {
+                    s11Amplitude[i] =20*0.5*log10(s11_real[i] * s11_real[i] + s11_im[i] * s11_im[i]);
+                    s11Amplitude[i] =20*0.5*log10(s11_real[i] * s11_real[i] + s11_im[i] * s11_im[i]);
+                    if (max<s11Amplitude[i])
+                        max = s11Amplitude[i];
+                    if (min>s11Amplitude[i])
+                        min = s11Amplitude[i];
+                }
+
+                sParameterChart.axisX()->setRange(freq[0],freq[N-1]);
+                sParameterChart.axisY()->setRange(min*1.5,10);
+                s11Series.clear();
+                s21Series.clear();
+                for(int i=0;i<N;++i)
+                {
+                    s11Series.append(freq[i],s11Amplitude[i]);
+                }
+                vnaStatus=ReadStatus::None;
+            }
+            else
+                return;
         }
-        double rou;
-        if(ui->chbVswr->isChecked())
-        {
-            rou = tl.calSwr(d);
-            qDebug("在距离终端负载%fm处的驻波比为%f \n",d,rou);
-            str.sprintf("在距离终端负载%fm处的驻波比为%f ",d,rou);
-            resList1.append(str);
-        }        
-        //draw Smithchart background
-        SmithChart smithchart(imgHeight-80,imgWidth-80);
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        qreal resistor = zl.getReal()/z0;
-        qreal x = zl.getImag()/z0;
-        QPointF crossP = smithchart.getRandXCrossP(resistor,x);
-        QPointF point;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        qreal rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        resList1.append(QString("SmithChart 分析结果："));
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw SWR Rcircle
-        struct CrossPoints crossP2;
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        QPointF point2 = crossP2.crossP[0];
-        qreal swr = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-        if(ui->chbVswr->isChecked())
-            resList1.append(QString("\t驻波比结果:%1").arg(swr));
-        smithchart.setText(point2,QString("%1").arg(swr));
-        //read Zin
-        qreal startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        qreal spanAng = 2*tl.getBeta()*d;
-        spanAng=spanAng/M_PI*180;
-        while(spanAng>=360.0)
-            spanAng = spanAng-360;
-        // -spanAngle is toward Power
-        QPointF resPoint;
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        if(ui->chbRCoef->isChecked())
-            resList1.append(QString("\t反射系数结果:%1+j%2").arg(resPoint.x()).arg(resPoint.y()));
-        // cal the R of CrossP2
-        resistor = smithchart.calRfromCrossp(resPoint);
-        smithchart.resistorCircle(resistor,Qt::cyan);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        //cal the X of CrossP2
-        x = smithchart.calXfromCrossp(resPoint);
-        smithchart.xCircle(x,Qt::cyan);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        if(ui->chbZin->isChecked())
-        {
-            resList1.append(QString("\t输入阻抗:%1+j%2").arg(resistor*z0).arg(x*z0));
-        }
-        ui->label_BasicSmithChart->setPixmap(*pImg);
-        //显示输出结果
-        model1.setStringList(resList1);
+    }
+}
+
+void MainWindow::onVnaError(QSerialPort::SerialPortError error)
+{
+    QString str(error);
+    log.write(QString("Error:")+str);
+}
+
+void MainWindow::onTimerOut()
+{
+    if(isVnaOpened)
+        on_pbSingleStep_clicked();
+    else
+        timer.stop();
+}
+
+void MainWindow::on_s11SeriesHovered(const QPointF &point, bool state)
+{
+    if (pS11Callout == nullptr)
+        pS11Callout = new Callout(&sParameterChart);
+    if (state)
+    {
+       pS11Callout->setText(QString("Freq:%2Hz\nS11: %1dB").arg(point.y()).arg(point.x()));
+       pS11Callout->setAnchor(point);
+       pS11Callout->setZValue(11);
+       pS11Callout->updateGeometry();
+       pS11Callout->show();
     }
     else
     {
-        showWarning("请勾选输入阻抗、反射系数或驻波比等复选框，给出计算要求");
-        return;
+        pS11Callout->hide();
     }
 }
 
-void MainWindow::on_pb_CountQuanLamda_clicked()
+void MainWindow::on_s21SeriesHovered(const QPointF &point, bool state)
 {
-    if(ui->le_z0->text().isEmpty())
+    if (pS21Callout == nullptr)
+        pS21Callout = new Callout(&sParameterChart);
+    if (state)
     {
-        showWarning("请输入传输线的特性阻抗");
-        return;
-    }
-    if(ui->le_Freq->text().isEmpty())
-    {
-        showWarning("请输入传输线的工作频率");
-        return;
-    }
-    if(ui->le_zlR->text().isEmpty())
-    {
-        showWarning("请输入传输线的终端负载的实部");
-        return;
-    }
-    if(ui->le_zlim->text().isEmpty())
-    {
-        showWarning("请输入传输线的终端负载的虚部");
-        return;
-    }
-    double z0=ui->le_z0->text().toDouble();
-    Complex zl(ui->le_zlR->text().toDouble(),ui->le_zlim->text().toDouble());
-    double freq = ui->le_Freq->text().toDouble()*1000000;//转换成Hz
-    double v = 300000000.0;//相速
-    QString str;
-    str = QString("1/4λ阻抗匹配：工作频率:%1MHz\t特性阻抗:%2Ω\t终端负载阻抗：%3+j%4(Ω)\t").arg(freq/1000000).arg(z0).arg(zl.getReal()).arg(zl.getImag());
-    //qDebug()<<str;
-
-    //显示输出结果的StringList
-    //QStringList strList;  //只能显示当前的计算结果，如何显示历史结果呢？=》保留上一次的strList信息，即strList的声明周期不能局限在这个函数中
-    resList2.append(str);
-    str = QString("公式计算结果:");
-    resList2.append(str);
-    //TransmissionLine tl(z0,zl,v/freq);
-    lamdaDiv4 tl(z0,zl,v/freq);
-    bool ok;
-    ok = tl.calMatchParameter();
-    if(ok)
-        str = QString("结果: 枝节距终端负载距离l1=%1m\t 和枝节特性阻抗z01=%2Ω").arg(tl.getL1()).arg(tl.getZ01());
-    else
-        str = QString("已匹配，毋需加入匹配枝节");
-    resList2.append(str);
-    //SmithChart
-    //draw Smithchart background
-    SmithChart smithchart(imgHeight-80,imgWidth-80);
-    smithchart.setPainter(pPainter);
-    smithchart.drawBackground();
-    //draw Rcircle and XCircle， then draw Cross Point
-    qreal resistor = zl.getReal()/z0;
-    qreal x = zl.getImag()/z0;
-    QPointF crossP = smithchart.getRandXCrossP(resistor,x);
-    QPointF point;
-    smithchart.resistorCircle(resistor,Qt::red);
-    point = smithchart.getRandXAxisCrossp(resistor);
-    smithchart.drawCrossPoint(point);
-    smithchart.setText(point,QString("%1").arg(resistor));
-    smithchart.xCircle(x,Qt::red);
-    point = smithchart.getRcoefandXCrossp(1,x);
-    smithchart.drawCrossPoint(point);
-    smithchart.setText(point,QString("%1").arg(x));
-    //draw rcoef circle
-    smithchart.drawCrossPoint(crossP);
-    smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-    qreal rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-    resList1.append(QString("SmithChart 分析结果："));
-    smithchart.rCoefCircle(rCoef,Qt::blue);
-    //draw SWR Rcircle
-    struct CrossPoints crossP2;
-    crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-    QPointF point2 = crossP2.crossP[0];
-    qreal swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-    smithchart.setText(point2,QString("%1").arg(swr1));
-    QPointF point3 = crossP2.crossP[1];
-    qreal swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-    smithchart.setText(point3,QString("%1").arg(swr2));
-    //cal phi
-    qreal startPhi,stopPhi1,stopPhi2;
-    qreal spanPhi;
-    startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-    stopPhi1 = 0;
-    stopPhi2 = M_PI;
-    //stopPhi1 =smithchart.getRcoefPhiFromCrossp(point2);
-    //stopPhi2 =smithchart.getRcoefPhiFromCrossp(point3);
-    resList2.append(QString("SmithChart作图的结果："));
-    qreal Rin;
-    bool isHalfLamda;
-    if(startPhi<=M_PI)
-    {
-        spanPhi = stopPhi1-startPhi;
-        Rin = swr1;
-        isHalfLamda = false;
+       pS21Callout->setText(QString("Freq:%2Hz\nS21: %1dB").arg(point.y()).arg(point.x()));
+       pS21Callout->setAnchor(point);
+       pS21Callout->setZValue(11);
+       pS21Callout->updateGeometry();
+       pS21Callout->show();
     }
     else
     {
-        spanPhi = stopPhi2-startPhi;
-        Rin = swr2;
-        isHalfLamda= true;
+        pS21Callout->hide();
     }
-    QPointF PForLamda = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-    smithchart.drawCrossPoint(PForLamda);
-    qreal phiLamda = smithchart.calLamdaFromCrossp(PForLamda);
-    smithchart.setText(PForLamda,QString("%1λ").arg(phiLamda));
-    smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-    if(isHalfLamda)
+}
+
+void MainWindow::on_pbSaveData_clicked()
+{
+    int Num1 = s11Series.points().length();
+    int Num2 = s21Series.points().length();
+    if (0==Num1 && 0 == Num2)
     {
-        resList2.append(QString("\t从终端负载位置%1λ转到0.5λ：0.5λ-%2λ=%3λ").arg(phiLamda).arg(phiLamda).arg(0.5-phiLamda));
-        resList2.append(QString("\t所以1/4λ阻抗变换器加在距离终端负载ZL %1m处").arg((0.5-phiLamda)*tl.getLamda()));
+        QMessageBox::warning(this,"warning",tr("没有S11或者S22数据需要保存！"));
+        return;
+    }
+    bool isTimerActive=false;
+    if(timer.isActive())
+    {
+        timer.stop();
+        isTimerActive = true;
+    }
+    QString FileName = QFileDialog::getSaveFileName(this,"Save Data","./","Data Files(*.dat)");
+    if(FileName.isEmpty())
+    {
+        QMessageBox::warning(this,"warning",tr("请输入保存文件名"));
+        return;
+    }
+    QFile file(FileName);
+    if(file.open(QIODevice::WriteOnly))
+    {
+        QTextStream out(&file);
+        out<<"chl20230517\n";
+        if(Num1)
+        {
+            out<<"S11\n";
+            int i=0;
+            while(i<Num1)
+            {
+                out<<s11Series.points().at(i).x()<<','<<s11Series.points().at(i).y();
+                ++i;
+                if(i<Num1)
+                   out<<',';
+                else
+                    out<<'\n';
+            }
+        }
+
+        if(Num2)
+        {
+            out<<"S21\n";
+            int i=0;
+            int Num2 = s21Series.points().length();
+            while(i<Num2)
+            {
+                out<<s21Series.points().at(i).x()<<','<<s21Series.points().at(i).y();
+                ++i;
+                if(i<Num2)
+                   out<<',';
+            }
+        }
+        file.close();
+        if(isTimerActive)
+            timer.start();
     }
     else
     {
-        resList2.append(QString("\t从终端负载位置%1λ转到0.25λ：0.25λ-%1λ=%1λ").arg(phiLamda).arg(phiLamda).arg(0.25-phiLamda));
-        resList2.append(QString("\t所以1/4λ阻抗变换器加在距离终端负载ZL %1m处").arg((0.25-phiLamda)*tl.getLamda()));
+        QMessageBox::warning(this,"warning",tr("打开文件出错"));
     }
-    resList2.append(QString("\t因为加入1/4λ阻抗变换器距离终端负载ZL %1m处的归一化输入阻抗为%2Ω").arg((0.5-phiLamda)*tl.getLamda()).arg(Rin));
-    qreal z01 = sqrt(Rin)*z0;
-    resList2.append(QString("\t1/4λ阻抗变换器的特性阻抗为%1Ω").arg(z01));
-    ui->label_quanterLamdaSmithChart->setPixmap(*pImg);
-    //Display Result
-    model2.setStringList(resList2);
 }
 
-void MainWindow::on_pb_clear_clicked()
+
+void MainWindow::on_pbLoadData_clicked()
 {
-    ui->le_z0->setText("");
-    ui->le_zlR->setText("");
-    ui->le_zlim->setText("");
-    ui->le_Freq->setText("");
-    ui->ls_res->reset();
-    resList2.clear();
-    model2.setStringList(resList2);
-}
-
-void MainWindow::on_pbClear_series_clicked()
-{
-    ui->leZ0_Series->setText("");
-    ui->leFreq_Series->setText("");
-    ui->leZl_real_Series->setText("");
-    ui->leZl_img_Series->setText("");
-    resList3.clear();
-    model3.setStringList(resList3);
-}
-
-void MainWindow::on_pbCount_Series_clicked()
-{
-    if(ui->leZ0_Series->text().isEmpty())
+    QString fileName = QFileDialog::getOpenFileName();
+    if(!fileName.isEmpty())
     {
-        showWarning("请输入传输线的特性阻抗");
-        return;
-    }
-    if(ui->leFreq_Series->text().isEmpty())
-    {
-        showWarning("请输入传输线的工作频率");
-        return;
-    }
-    if(ui->leZl_real_Series->text().isEmpty())
-    {
-        showWarning("请输入传输线的终端负载的实部");
-        return;
-    }
-    if(ui->leZl_img_Series->text().isEmpty())
-    {
-        showWarning("请输入传输线的终端负载的虚部");
-        return;
-    }
-    resList3.clear();
-    double z0=ui->leZ0_Series->text().toDouble();
-    Complex zl(ui->leZl_real_Series->text().toDouble(),ui->leZl_img_Series->text().toDouble());
-    double freq = ui->leFreq_Series->text().toDouble()*1000000;//转换成Hz
-    double v = 300000000.0;//相速
-    QString str;
-    str = QString("单枝节串联匹配：工作频率:%1MHz\t特性阻抗:%2Ω\t终端负载阻抗：%3+j%4(Ω)\t").arg(freq/1000000).arg(z0).arg(zl.getReal()).arg(zl.getImag());
-    //qDebug()<<str;
-    //显示输出结果的StringList
-    //QStringList strList;  //只能显示当前的计算结果，如何显示历史结果呢？=》保留上一次的strList信息，即strList的声明周期不能局限在这个函数中
-    resList3.append(str);
-    str = QString("公式计算结果:");
-    resList3.append(str);
-    //TransmissionLine tl(z0,zl,v/freq);
-    SingleStubSeriesMatching tl(z0,zl,v/freq);
-    if(ui->radio_shortStub->isChecked())
-        tl.setStubType(shortStub);
-    if(ui->radio_openStub->isChecked())
-        tl.setStubType(openStub);
-
-    struct StubMatchResult res[2];
-    bool ok;
-    ok = tl.calMatchParameter();
-    if(ok)
-    {
-        tl.getMatchRes(res);
-        for(int i=0;i<2;++i)
+        QFile file(fileName);
+        if(file.open(QIODevice::ReadOnly))
         {
-            str = QString("Result %1: Pos l1=%2m\t stub l2=%3m").arg(i+1).arg(res[i].stubPos).arg(res[i].stubLen);
-            resList3.append(str);
-        }
-        //show SmithChart
-        resList3.append("****************************************");
-        resList3.append(QString("SmithChart做图方法如下："));
-        resList3.append(QString("1. 求出终端负载的归一化阻抗，然后绘制电阻圆和电抗圆"));
-        resList3.append(QString("2. 找到终端负载电阻圆和电抗圆的交点，过交点绘制出终端负载的反射系数圆"));
-        resList3.append(QString("3. 绘制电阻为1的匹配圆，找到并标记处其与终端负载的反射系数圆的交点（一般会有2个）"));
-        resList3.append(QString("4. 从负载位置向电源方向转到与匹配圆的2个交点（对应两组解），所转过的长度即为串联单枝节加入位置"));
-        resList3.append(QString("5. 若已选中一个与匹配圆相交的一个交点，则绘制出过该点的电抗圆，读取其对应的归一化电抗值"));
-        resList3.append(QString("6. 为了抵消该归一化电抗，绘制出与之取反的电抗值所对应的电抗圆，并绘制出其与反射系数为1的圆的交点"));
-        resList3.append(QString("7. 从短路点（开路点）沿向电源方向转到该交点，其转过的长度即对应的短路（开路）枝节长度"));
-        resList3.append(QString("8. 其对应的两组解的求解做图过程请查阅右侧的对应的两个解的SmithChart。"));
-        resList3.append("****************************************");
-        resList3.append("具体做图的结果如下，亦可通过右图读取对应的数值");
-        //draw Smithchart background
-        SmithChart smithchart(imgHeight-80,imgWidth-80);
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        qreal resistor = zl.getReal()/z0;
-        qreal x = zl.getImag()/z0;
-        QPointF crossP = smithchart.getRandXCrossP(resistor,x);
-        QPointF point;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        qreal rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw match Rcircle and Count crossPoint;
-        struct CrossPoints crossP2;
-        smithchart.resistorCircle(1,Qt::cyan);
-        crossP2 = smithchart.getRcoefandRCrossP(rCoef,1);
-        for(int i=0;i<crossP2.nPoints;++i)
-        {
-            smithchart.drawCrossPoint(crossP2.crossP[i]);
-        }
-        // from CrossP to crossP2.crossP[0]
-        qreal startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        qreal stopAng = atan2(crossP2.crossP[0].y(),crossP2.crossP[0].x());
-        stopAng = stopAng/M_PI*180;
-        if(stopAng<0)
-            stopAng = stopAng +360;
-        qreal spanAng = stopAng-startAng;
-        if(spanAng<0)
-            spanAng = -spanAng;
-        // -spanAngle is toward Power
-        QPointF resPoint;
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        //cal and draw the position of stub
-        QPointF PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda1);
-        qreal phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-        QPointF PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[0],Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda2);
-        qreal phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-        //cal and draw x circle
-        qreal x1 = smithchart.calXfromCrossp(crossP2.crossP[0]);
-        smithchart.xCircle(x1,Qt::blue);
-        QPointF x1Point = smithchart.getRcoefandXCrossp(1,x1);
-        smithchart.drawCrossPoint(x1Point);
-        smithchart.setText(x1Point,QString("%1").arg(x1));
-        qreal x2 = -x1;
-        smithchart.xCircle(x2,Qt::blue);
-        QPointF x2Point = smithchart.getRcoefandXCrossp(1,x2);
-        smithchart.calAndDrawLineFromOrign(x2Point,Qt::darkBlue);
-        smithchart.drawCrossPoint(x2Point);
-        //smithchart.setText(x2Point,QString("%1").arg(x2));
-        qreal posLamda1 = smithchart.calLamdaFromCrossp(x2Point);
-        smithchart.setText(x2Point,QString("%1λ").arg(posLamda1));
-        qreal stubPos1,stubPos2;
-        qreal stubLen1=0,stubLen2=0;
-
-        if(ui->radio_shortStub->isChecked())
-        {
-            smithchart.drawShortPoint();
-            startAng = 180;
-            stopAng = atan2(x2Point.y(),x2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = 180-stopAng;
-            else
-                spanAng = stopAng-startAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
+            QTextStream in(&file);
+            QString str;
+            str = in.readLine();
+            if(str.contains("chl20230517"))
             {
-                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
+                if(timer.isActive())
+                {
+                    timer.stop();
+                }
+                bool isS11=false;
+                bool isS21=false;
+                if(!in.atEnd())
+                {
+                    double freq[401];//定义频率参数
+                    double s11Amplitude[401];
+                    int Num=0;
+                    int min,max,start,stop;
+                    min = 0;
+                    max=0;
+                    str = in.readLine();
+                    log.write(str);
+                    if(str.contains("S11"))
+                    {
+                        str = in.readLine();
+                        log.write(str);
+                        QStringList list = str.split(',');
+                        double x;
+                        double y;
+                        for(int i=0;i<list.length();i=i+2)
+                        {
+                            x = list.at(i).toDouble();
+                            y = list.at(i+1).toDouble();
+                            freq[i/2]=x;
+                            s11Amplitude[i/2]=y;
+                            if(0==i)
+                                start = x;
+                            if(i==list.length()-2)
+                                stop =x;
+                            if(min>y)
+                                min = y;
+                            if(max<y)
+                                max = y;
+                            ++Num;
+                        }
+                        s11Series.clear();
+                        sParameterChart.axisX()->setRange(start,stop);
+                        if(max<10)
+                            max = 10;
+                        if(abs(min)<1)
+                            min=-2;
+                        sParameterChart.axisY()->setRange(min*1.5,max);
+                        for(int i=0;i<Num;++i)
+                        {
+                           s11Series.append(freq[i],s11Amplitude[i]);
+                        }
+                        isS11 = true;
+                    }
+                    else
+                    {
+                        s11Series.clear();                       
+                    }
+                    if(!in.atEnd())
+                    {
+                        s21Series.clear();
+                        double freq[401];//定义频率参数
+                        double s21Amplitude[401];
+                        int Num=0;
+                        int min,max,start,stop;
+                        min = 0;
+                        max=0;
+                        if(isS11)
+                            str = in.readLine();
+                        if(str.contains("S21"))
+                        {
+                            str = in.readLine();
+                            log.write(str);
+                            QStringList list = str.split(',');
+                            double x;
+                            double y;
+                            for(int i=0;i<list.length();i=i+2)
+                            {
+                                x = list.at(i).toDouble();
+                                y = list.at(i+1).toDouble();
+                                freq[i/2]=x;
+                                s21Amplitude[i/2]=y;
+                                if(0==i)
+                                    start = x;
+                                if(i==list.length()-2)
+                                    stop =x;
+                                if(min>y)
+                                    min = y;
+                                if(max<y)
+                                    max = y;
+                                ++Num;
+                            }
+                            s21Series.clear();
+                            sParameterChart.axisX()->setRange(start,stop);
+                            if(max<10)
+                                max = 10;
+                            if(abs(min)<1)
+                                min=-2;
+                            sParameterChart.axisY()->setRange(min*1.5,max);
+                            for(int i=0;i<Num;++i)
+                            {
+                               s21Series.append(freq[i],s21Amplitude[i]);
+                            }
+                            isS21 = true;
+                        }
+                        else
+                            s21Series.clear();
+                    }
+                    else
+                        if(!isS21)
+                          s21Series.clear();
+                }
             }
             else
             {
-                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
+                QMessageBox::warning(this,"warning",tr("打开的不是S参数测量保存的历史数据文件！"));
             }
-            stubLen1 = posLamda1*v/freq;
         }
         else
         {
-            smithchart.drawOpenPoint();
-            startAng = 0;
-            stopAng = atan2(x2Point.y(),x2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = -stopAng;
-            else
-                spanAng = 360-stopAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            if(posLamda1>0.25)
-                stubLen1 = (posLamda1-0.25)*v/freq;
-            else
-                stubLen1 = (posLamda1+0.25)*v/freq;
+            QMessageBox::warning(this,"warning",tr("打开文件出错"));
+            return;
         }
-        str = QString("Result 1: Pos l1=%1m\t stub l2=%2m").arg(stubPos1).arg(stubLen1);
-        resList3.append(str);
+    }
+}
 
-        ui->label_SingleStubSsmithChart->setPixmap(*pImg);
-        /* ******************************
-         * the second resolution        *
-         * ******************************/
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw match Rcircle and Count crossPoint;
-        smithchart.resistorCircle(1,Qt::cyan);
-        crossP2 = smithchart.getRcoefandRCrossP(rCoef,1);
-        for(int i=0;i<crossP2.nPoints;++i)
-        {
-            smithchart.drawCrossPoint(crossP2.crossP[i]);
-        }
-        // from CrossP to crossP2.crossP[1]
-        startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        stopAng = atan2(crossP2.crossP[1].y(),crossP2.crossP[1].x());
-        stopAng = stopAng/M_PI*180;
-        if(stopAng<0)
-            stopAng = stopAng +360;
-        spanAng = stopAng-startAng;
-        if(spanAng<0)
-            spanAng = -spanAng;
-        else
-            spanAng = 360-spanAng;
-        // -spanAngle is toward Power
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        //cal and draw the position of stub
-        PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda1);
-        phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-        PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[1],Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda2);
-        phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-        //cal and draw x circle
-        x1 = smithchart.calXfromCrossp(crossP2.crossP[1]);
-        smithchart.xCircle(x1,Qt::blue);
-        x1Point = smithchart.getRcoefandXCrossp(1,x1);
-        smithchart.drawCrossPoint(x1Point);
-        smithchart.setText(x1Point,QString("%1").arg(x1));
-        x2 = -x1;
-        smithchart.xCircle(x2,Qt::blue);
-        x2Point = smithchart.getRcoefandXCrossp(1,x2);
-        smithchart.calAndDrawLineFromOrign(x2Point,Qt::darkBlue);
-        smithchart.drawCrossPoint(x2Point);
-        //smithchart.setText(x2Point,QString("%1").arg(x2));
-        posLamda1 = smithchart.calLamdaFromCrossp(x2Point);
-        smithchart.setText(x2Point,QString("%1λ").arg(posLamda1));
-        if(ui->radio_shortStub->isChecked())
-        {
-            smithchart.drawShortPoint();
-            startAng = 180;
-            stopAng = atan2(x2Point.y(),x2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = 180-stopAng;
-            else
-                spanAng = stopAng-startAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            else
-                spanAng = 360-spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            stubLen1 = posLamda1*v/freq;
-        }
-        else
-        {
-            smithchart.drawOpenPoint();
-            startAng = 0;
-            stopAng = atan2(x2Point.y(),x2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = -stopAng;
-            else
-                spanAng = 360-stopAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            if(posLamda1>0.25)
-                stubLen1 = (posLamda1-0.25)*v/freq;
-            else
-                stubLen1 = (posLamda1+0.25)*v/freq;
-        }
-        str = QString("Result 2: Pos l1=%1m\t stub l2=%2m").arg(stubPos1).arg(stubLen1);
-        resList3.append(str);
-        ui->label_SingleStubSsmithChart_2->setPixmap(*pImg);
+void MainWindow::on_pbSaveUIImage_clicked()
+{
+    QPixmap pixmap;
+    pixmap =this->centralWidget()->grab(this->centralWidget()->rect());
+    QImage image = pixmap.toImage();
+    QString fileName = QFileDialog::getSaveFileName
+            (this,"Save Image","./","JPEG Files(*.jpg);PNG Files(*.png)");
+    if(fileName.trimmed()!="")
+    {
+        pixmap.save(fileName);
+        ui->statusbar->showMessage("save file:"+fileName,60);
     }
     else
     {
-        str = QString("已匹配，毋需加入匹配枝节");
-        resList3.append(str);
+        ui->statusbar->showMessage("please input filename! ",60);
     }
-    model3.setStringList(resList3);   
-}
-
-void MainWindow::on_pbClear_Parallel_clicked()
-{
-    ui->leZ0_Parallel->setText("");
-    ui->leFreq_Parallel->setText("");
-    ui->leZl_real_Parallel->setText("");
-    ui->leZl_img_Parallel->setText("");
-    resList4.clear();
-    model4.setStringList(resList4);
-}
-
-void MainWindow::on_pbCount_Parallel_clicked()
-{
-    if(ui->leZ0_Parallel->text().isEmpty())
-    {
-        showWarning("请输入传输线的特性阻抗");
-        return;
-    }
-    if(ui->leFreq_Parallel->text().isEmpty())
-    {
-        showWarning("请输入传输线的工作频率");
-        return;
-    }
-    if(ui->leZl_real_Parallel->text().isEmpty())
-    {
-        showWarning("请输入传输线的终端负载的实部");
-        return;
-    }
-    if(ui->leZl_img_Parallel->text().isEmpty())
-    {
-        showWarning("请输入传输线的终端负载的虚部");
-        return;
-    }
-    double z0=ui->leZ0_Parallel->text().toDouble();
-    Complex zl(ui->leZl_real_Parallel->text().toDouble(),ui->leZl_img_Parallel->text().toDouble());
-    double freq = ui->leFreq_Parallel->text().toDouble()*1000000;//转换成Hz
-    double v = 300000000.0;//相速
-    QString str;
-    str = QString("单枝节串联匹配：工作频率:%1MHz\t特性阻抗:%2Ω\t终端负载阻抗：%3+j%4(Ω)\t").arg(freq/1000000).arg(z0).arg(zl.getReal()).arg(zl.getImag());
-    //qDebug()<<str;
-    //显示输出结果的StringList
-    //QStringList strList;  //只能显示当前的计算结果，如何显示历史结果呢？=》保留上一次的strList信息，即strList的声明周期不能局限在这个函数中
-    resList4.clear();
-    resList4.append(str);
-    str = QString("公式计算结果:");
-    resList4.append(str);
-    //TransmissionLine tl(z0,zl,v/freq);
-    SingleStubParallelMatching tl(z0,zl,v/freq);
-    if(ui->radio_shortStub->isChecked())
-        tl.setStubType(shortStub);
-    if(ui->radio_openStub->isChecked())
-        tl.setStubType(openStub);
-
-    struct StubMatchResult res[2];
-    bool ok;
-    ok = tl.calMatchParameter();
-    if(ok)
-    {
-        tl.getMatchRes(res);
-        for(int i=0;i<2;++i)
-        {
-            str = QString("Result %1: Pos l1=%2m\t stub l2=%3m").arg(i+1).arg(res[i].stubPos).arg(res[i].stubLen);
-            resList4.append(str);
-        }
-        // No.1 solution in Z circle
-        resList4.append("SmithChart具体做图的结果如下，亦可通过右图读取对应的数值");
-        //draw Smithchart background
-        SmithChart smithchart(imgHeight-80,imgWidth-80);
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        qreal resistor = zl.getReal()/z0;
-        qreal x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        smithchart.xCircle(x,Qt::red);
-        QPointF point = smithchart.getRandXCrossP(resistor,x);
-        smithchart.drawCrossPoint(point);
-        QPointF crossP;
-        crossP = -point;
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        qreal rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw rotate 180° to Y circle
-        smithchart.drawLine(point,crossP,Qt::darkBlue);
-        //draw match Rcircle and Count crossPoint;
-        struct CrossPoints crossP2;
-        smithchart.resistorCircle(1,Qt::cyan);
-        crossP2 = smithchart.getRcoefandRCrossP(rCoef,1);
-        for(int i=0;i<crossP2.nPoints;++i)
-        {
-            smithchart.drawCrossPoint(crossP2.crossP[i]);
-        }
-        // from CrossP to crossP2.crossP[0]
-        qreal startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        qreal stopAng = atan2(crossP2.crossP[0].y(),crossP2.crossP[0].x());
-        stopAng = stopAng/M_PI*180;
-        if(stopAng<0)
-            stopAng = stopAng +360;
-        qreal spanAng = stopAng-startAng;
-        if(spanAng<0)
-            spanAng = -spanAng;
-        // -spanAngle is toward Power
-        QPointF resPoint;
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        //cal and draw the position of stub
-        QPointF PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda1);
-        qreal phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-        QPointF PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[0],Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda2);
-        qreal phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-        //cal and draw x circle
-        qreal x1 = smithchart.calXfromCrossp(crossP2.crossP[0]);
-        smithchart.xCircle(x1,Qt::blue);
-        QPointF x1Point = smithchart.getRcoefandXCrossp(1,x1);
-        smithchart.drawCrossPoint(x1Point);
-        smithchart.setText(x1Point,QString("%1").arg(x1));
-        qreal x2 = -x1;
-        smithchart.xCircle(x2,Qt::blue);
-        QPointF x2Point1 = smithchart.getRcoefandXCrossp(1,x2);
-        smithchart.drawCrossPoint(x2Point1);
-        smithchart.setText(x2Point1,QString("%1").arg(x2));
-        QPointF x2Point2 = -x2Point1;
-        smithchart.drawLine(x2Point1,x2Point2,Qt::darkBlue);
-        smithchart.drawCrossPoint(x2Point2);
-        qreal posLamda1 = smithchart.calLamdaFromCrossp(x2Point2);
-        smithchart.setText(x2Point2,QString("%1λ").arg(posLamda1));
-        qreal stubPos1,stubPos2;
-        qreal stubLen1=0,stubLen2=0;
-        if(ui->radio_shortStub_2->isChecked())
-        {
-            smithchart.drawShortPoint();
-            startAng = 180;
-            stopAng = atan2(x2Point2.y(),x2Point2.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = 180-stopAng;
-            else
-                spanAng = stopAng-startAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            else
-                spanAng = 360-spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            stubLen1 = posLamda1*v/freq;
-        }
-        else
-        {
-            smithchart.drawOpenPoint();
-            startAng = 0;
-            stopAng = atan2(x2Point2.y(),x2Point2.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = -stopAng;
-            else
-                spanAng = 360-stopAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            if(posLamda1>0.25)
-                stubLen1 = (posLamda1-0.25)*v/freq;
-            else
-                stubLen1 = (posLamda1+0.25)*v/freq;
-        }
-        str = QString("阻抗圆图求解 Result 1: Pos l1=%1m\t stub l2=%2m").arg(stubPos1).arg(stubLen1);
-        resList4.append(str);
-        ui->label_SingleStubPsmithChart_1->setPixmap(*pImg);
-
-        //No.1 sloution in Y circle
-        //draw Smithchart background
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Gcircle and bCircle， then draw Cross Point
-        qreal g,b;
-        g = tl.calZl2Y().getReal()*z0;
-        b = tl.calZl2Y().getImag()*z0;
-        smithchart.gCircle(g,Qt::red);
-        smithchart.bCircle(b,Qt::red);
-        crossP = smithchart.getGandBCrossP(g,b);
-        smithchart.drawCrossPoint(point);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw match gcircle and Count crossPoint;
-        smithchart.gCircle(1,Qt::cyan);
-        crossP2 = smithchart.getRcoefandGCrossP(rCoef,1);
-        for(int i=0;i<crossP2.nPoints;++i)
-        {
-            smithchart.drawCrossPoint(crossP2.crossP[i]);
-        }
-        // from CrossP to crossP2.crossP[1]
-        startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        stopAng = atan2(crossP2.crossP[1].y(),crossP2.crossP[1].x());
-        stopAng = stopAng/M_PI*180;
-        if(stopAng<0)
-            stopAng = stopAng +360;
-        spanAng = stopAng-startAng;
-        if(spanAng<0)
-            spanAng = -spanAng;
-        else
-            spanAng = 360-spanAng;
-        // -spanAngle is toward Power
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        //cal and draw the position of stub
-        PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda1);
-        phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-        PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[1],Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda2);
-        phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-        //cal and draw bcircle
-        qreal b1 = smithchart.calBfromCrossp(crossP2.crossP[1]);
-        smithchart.bCircle(b1,Qt::blue);
-        QPointF b1Point = smithchart.getRcoefandXCrossp(1,b1);
-        smithchart.drawCrossPoint(b1Point);
-        smithchart.setText(b1Point,QString("%1").arg(b1));
-        qreal b2 = -b1;
-        smithchart.bCircle(b2,Qt::blue);
-        QPointF b2Point = smithchart.getRcoefandBCrossp(1,b2);
-        smithchart.drawCrossPoint(b2Point);
-        //smithchart.setText(b2Point,QString("%1").arg(b2));
-        smithchart.calAndDrawLineFromOrign(b2Point,Qt::darkBlue);
-        posLamda1 = smithchart.calLamdaFromCrossp(b2Point);
-        smithchart.setText(b2Point,QString("%1λ").arg(posLamda1));
-        if(ui->radio_shortStub_2->isChecked())
-        {
-            smithchart.drawShortPoint();
-            startAng = 180;
-            stopAng = atan2(b2Point.y(),b2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = 180-stopAng;
-            else
-                spanAng = stopAng-startAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos2 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos2 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            stubLen2 = posLamda1*v/freq;
-        }
-        else
-        {
-            smithchart.drawOpenPoint();
-            startAng = 0;
-            stopAng = atan2(b2Point.y(),b2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = -stopAng;
-            else
-                spanAng = 360-stopAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos2 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos2= (phiLamda2-phiLamda1)*v/freq;
-            }
-            if(posLamda1>0.25)
-                stubLen2 = (posLamda1-0.25)*v/freq;
-            else
-                stubLen2 = (posLamda1+0.25)*v/freq;
-        }
-        str = QString("导纳圆图求解 Result 1: Pos l1=%1m\t stub l2=%2m").arg(stubPos2).arg(stubLen2);
-        resList4.append(str);
-        ui->label_SingleStubPsmithChart_2->setPixmap(*pImg);
-
-        // No.2 solution in Z circle
-        //draw Smithchart background
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        smithchart.resistorCircle(resistor,Qt::red);
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRandXCrossP(resistor,x);
-        smithchart.drawCrossPoint(point);
-        crossP = -point;
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw rotate 180° to Y circle
-        smithchart.drawLine(point,crossP,Qt::darkBlue);
-        //draw match Rcircle and Count crossPoint;
-        smithchart.resistorCircle(1,Qt::cyan);
-        crossP2 = smithchart.getRcoefandRCrossP(rCoef,1);
-        for(int i=0;i<crossP2.nPoints;++i)
-        {
-            smithchart.drawCrossPoint(crossP2.crossP[i]);
-        }
-        // from CrossP to crossP2.crossP[0]
-        startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        stopAng = atan2(crossP2.crossP[1].y(),crossP2.crossP[1].x());
-        stopAng = stopAng/M_PI*180;
-        if(stopAng<0)
-            stopAng = stopAng +360;
-        spanAng = stopAng-startAng;
-        if(spanAng<0)
-            spanAng = -spanAng;
-        else
-            spanAng = 360-spanAng;
-        // -spanAngle is toward Power
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        //cal and draw the position of stub
-        PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda1);
-        phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-        PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[1],Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda2);
-        phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-        //cal and draw x circle
-        x1 = smithchart.calXfromCrossp(crossP2.crossP[1]);
-        smithchart.xCircle(x1,Qt::blue);
-        x1Point = smithchart.getRcoefandXCrossp(1,x1);
-        smithchart.drawCrossPoint(x1Point);
-        smithchart.setText(x1Point,QString("%1").arg(x1));
-        x2 = -x1;
-        smithchart.xCircle(x2,Qt::blue);
-        x2Point1 = smithchart.getRcoefandXCrossp(1,x2);
-        smithchart.drawCrossPoint(x2Point1);
-        smithchart.setText(x2Point1,QString("%1").arg(x2));
-        x2Point2 = -x2Point1;
-        smithchart.drawLine(x2Point1,x2Point2,Qt::darkBlue);
-        smithchart.drawCrossPoint(x2Point2);
-        posLamda1 = smithchart.calLamdaFromCrossp(x2Point2);
-        smithchart.setText(x2Point2,QString("%1λ").arg(posLamda1));
-        if(ui->radio_shortStub_2->isChecked())
-        {
-            smithchart.drawShortPoint();
-            startAng = 180;
-            stopAng = atan2(x2Point2.y(),x2Point2.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = 180-stopAng;
-            else
-                spanAng = stopAng-startAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos2 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos2 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            stubLen2 = posLamda1*v/freq;
-        }
-        else
-        {
-            smithchart.drawOpenPoint();
-            startAng = 0;
-            stopAng = atan2(x2Point2.y(),x2Point2.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = -stopAng;
-            else
-                spanAng = 360-stopAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos2 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos2= (phiLamda2-phiLamda1)*v/freq;
-            }
-            if(posLamda1>0.25)
-                stubLen2 = (posLamda1-0.25)*v/freq;
-            else
-                stubLen2 = (posLamda1+0.25)*v/freq;
-        }
-        str = QString("阻抗圆图求解 Result 2: Pos l1=%1m\t stub l2=%2m").arg(stubPos2).arg(stubLen2);
-        resList4.append(str);
-        ui->label_SingleStubPsmithChart_3->setPixmap(*pImg);
-
-        //No.2 sloution in Y circle
-        //draw Smithchart background
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Gcircle and bCircle， then draw Cross Point
-        g = tl.calZl2Y().getReal()*z0;
-        b = tl.calZl2Y().getImag()*z0;
-        smithchart.gCircle(g,Qt::red);
-        smithchart.bCircle(b,Qt::red);
-        crossP = smithchart.getGandBCrossP(g,b);
-        smithchart.drawCrossPoint(point);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        //draw match gcircle and Count crossPoint;
-        smithchart.gCircle(1,Qt::cyan);
-        crossP2 = smithchart.getRcoefandGCrossP(rCoef,1);
-        for(int i=0;i<crossP2.nPoints;++i)
-        {
-            smithchart.drawCrossPoint(crossP2.crossP[i]);
-        }
-        // from CrossP to crossP2.crossP[0]
-        startAng = atan2(crossP.y(),crossP.x());
-        startAng = startAng/M_PI*180;
-        if(startAng<0)
-            startAng = startAng + 360;
-        stopAng = atan2(crossP2.crossP[0].y(),crossP2.crossP[0].x());
-        stopAng = stopAng/M_PI*180;
-        if(stopAng<0)
-            stopAng = stopAng +360;
-        spanAng = stopAng-startAng;
-        if(spanAng<0)
-            spanAng = -spanAng;
-        else
-            spanAng = 360-spanAng;
-        // -spanAngle is toward Power
-        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-        //cal and draw the position of stub
-        PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda1);
-        phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-        PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[0],Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda2);
-        phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-        //cal and draw bcircle
-        b1 = smithchart.calBfromCrossp(crossP2.crossP[0]);
-        smithchart.bCircle(b1,Qt::blue);
-        b1Point = smithchart.getRcoefandXCrossp(1,b1);
-        smithchart.drawCrossPoint(b1Point);
-        smithchart.setText(b1Point,QString("%1").arg(b1));
-        b2 = -b1;
-        smithchart.bCircle(b2,Qt::blue);
-        b2Point = smithchart.getRcoefandBCrossp(1,b2);
-        smithchart.drawCrossPoint(b2Point);
-        //smithchart.setText(b2Point,QString("%1").arg(b2));
-        smithchart.calAndDrawLineFromOrign(b2Point,Qt::darkBlue);
-        posLamda1 = smithchart.calLamdaFromCrossp(b2Point);
-        smithchart.setText(b2Point,QString("%1λ").arg(posLamda1));
-        if(ui->radio_shortStub_2->isChecked())
-        {
-            smithchart.drawShortPoint();
-            startAng = 180;
-            stopAng = atan2(b2Point.y(),b2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = 180-stopAng;
-            else
-                spanAng = stopAng-startAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos2 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos2 = (phiLamda2-phiLamda1)*v/freq;
-            }
-            stubLen2 = posLamda1*v/freq;
-        }
-        else
-        {
-            smithchart.drawOpenPoint();
-            startAng = 0;
-            stopAng = atan2(b2Point.y(),b2Point.x());
-            stopAng = stopAng/M_PI*180;
-            qreal spanAng;
-            if(stopAng<0)
-                spanAng = -stopAng;
-            else
-                spanAng = 360-stopAng;
-            if(spanAng<0)
-                spanAng = -spanAng;
-            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-            if(phiLamda1>phiLamda2)
-            {
-                stubPos2 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-            }
-            else
-            {
-                stubPos2= (phiLamda2-phiLamda1)*v/freq;
-            }
-            if(posLamda1>0.25)
-                stubLen2 = (posLamda1-0.25)*v/freq;
-            else
-                stubLen2 = (posLamda1+0.25)*v/freq;
-        }
-        str = QString("导纳圆图求解 Result 1: Pos l1=%1m\t stub l2=%2m").arg(stubPos2).arg(stubLen2);
-        resList4.append(str);
-        ui->label_SingleStubPsmithChart_4->setPixmap(*pImg);
-    }
-    else
-    {
-        str = QString("已匹配，毋需加入匹配枝节");
-        resList4.append(str);
-    }
-    model4.setStringList(resList4);
-}
-
-
-void MainWindow::on_label_BasicSmithChart_doubleClicked()
-{
-    if(ui->chbZin->isChecked()||ui->chbVswr->isChecked()||ui->chbRCoef->isChecked())
-    {
-        if(ui->leZ0->text().isEmpty())
-        {
-            return;
-        }
-        if(ui->leFreq->text().isEmpty())
-        {
-            return;
-        }
-        if(ui->leDist->text().isEmpty())
-        {
-            return;
-        }
-        if(ui->leZl_real->text().isEmpty())
-        {
-            return;
-        }
-        if(ui->leZl_real->text().isEmpty())
-        {
-            return;
-        }
-        double z0=ui->leZ0->text().toDouble();
-        Complex zl(ui->leZl_real->text().toDouble(),ui->leZl_img->text().toDouble());
-        double freq = ui->leFreq->text().toDouble()*1000000;//转换成Hz
-        double d = ui->leDist->text().toDouble();
-        double v = 300000000;//相速
-        TransmissionLine tl(z0,zl,v/freq);
-        QString str;
-        Complex zin;
-        QPointF crossP;
-        QPointF point;
-        QPointF point2;
-        QPointF resPoint;
-        struct CrossPoints crossP2;
-        qreal resistor;
-        qreal x;
-        qreal rCoef ;
-        qreal swr;
-        qreal startAng;
-        qreal spanAng;
-        qreal phiLamda1,phiLamda2;
-        SmithChart smithchart(imgHeight-80,imgWidth-80);
-        switch(step4Base)
-        {
-        case 0:
-            str = QString("SmithChart做图求解全过程如下:");
-            resList1.append(str);
-            //draw Smithchart background
-
-            smithchart.setPainter(pPainter);
-            smithchart.drawBackground();
-            //draw Rcircle and XCircle， then draw Cross Point
-            resistor = zl.getReal()/z0;
-            x = zl.getImag()/z0;
-            smithchart.resistorCircle(resistor,Qt::red);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            smithchart.xCircle(x,Qt::red);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            str = QString("Step 1: 计算负载的归一化电阻和电抗值，然后在SmithChart上绘制出对应的电阻圆R=%1和电抗圆X=%2；").arg(resistor).arg(x);
-            resList1.append(str);
-            ++step4Base;
-            break;
-        case 1:
-            //Step 0
-            smithchart.setPainter(pPainter);
-            smithchart.drawBackground();
-            //draw Rcircle and XCircle， then draw Cross Point
-            resistor = zl.getReal()/z0;
-            x = zl.getImag()/z0;
-            smithchart.resistorCircle(resistor,Qt::red);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            smithchart.xCircle(x,Qt::red);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            //step 1
-            crossP = smithchart.getRandXCrossP(resistor,x);
-            //draw rcoef circle
-            smithchart.drawCrossPoint(crossP);
-            smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-            rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-            smithchart.rCoefCircle(rCoef,Qt::blue);
-            smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-            str = QString("Step 2: 找到R=%1的电阻圆和X=%2电抗圆的交点，过交点做反射系数圆，并读取反射系数为%3；").arg(resistor).arg(x).arg(rCoef);
-            resList1.append(str);
-            ++step4Base;
-            break;
-       case 2:
-            //Step 0
-            smithchart.setPainter(pPainter);
-            smithchart.drawBackground();
-            //draw Rcircle and XCircle， then draw Cross Point
-            resistor = zl.getReal()/z0;
-            x = zl.getImag()/z0;
-            smithchart.resistorCircle(resistor,Qt::red);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            smithchart.xCircle(x,Qt::red);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            //step 1
-            crossP = smithchart.getRandXCrossP(resistor,x);
-            //draw rcoef circle
-            smithchart.drawCrossPoint(crossP);
-            smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-            rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-            smithchart.rCoefCircle(rCoef,Qt::blue);
-            smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-            //Step 2
-            //draw SWR Rcircle
-            crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-            point2 = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.drawCrossPoint(point2);
-            swr = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            smithchart.setText(point2,QString("%1").arg(swr));
-            str = QString("Step 3: 找到反射系数为%1的反射系数圆和X轴正半轴的交点，过交点做电阻圆，读取该电阻圆对应\n的归一化电阻值即驻波比为%2；").arg(rCoef).arg(swr);
-            resList1.append(str);
-            ++step4Base;
-            break;
-        case 3:
-            //Step 0
-            smithchart.setPainter(pPainter);
-            smithchart.drawBackground();
-            //draw Rcircle and XCircle， then draw Cross Point
-            resistor = zl.getReal()/z0;
-            x = zl.getImag()/z0;
-            smithchart.resistorCircle(resistor,Qt::red);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            smithchart.xCircle(x,Qt::red);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            //step 1
-            crossP = smithchart.getRandXCrossP(resistor,x);
-            //draw rcoef circle
-            smithchart.drawCrossPoint(crossP);
-            smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-            rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-            smithchart.rCoefCircle(rCoef,Qt::blue);
-            smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-            //Step 2
-            //draw SWR Rcircle
-            crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-            point2 = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.drawCrossPoint(point2);
-            swr = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            smithchart.setText(point2,QString("%1").arg(swr));
-            //Step 3
-            startAng = atan2(crossP.y(),crossP.x());
-            startAng = startAng/M_PI*180;
-            if(startAng<0)
-                startAng = startAng + 360;
-            point2 = smithchart.calAndDrawLineFromOrign(crossP,Qt::red);
-            smithchart.drawCrossPoint(point2);
-            phiLamda1 = smithchart.calLamdaFromCrossp(point2);
-            smithchart.setText(point2,QString("%1λ").arg(phiLamda1));
-            spanAng = 2*tl.getBeta()*d;
-            spanAng=spanAng/M_PI*180;
-            while(spanAng>=360.0)
-                spanAng = spanAng-360;
-            // -spanAngle is toward Power
-            resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-            point2 = smithchart.calAndDrawLineFromOrign(resPoint,Qt::red);
-            smithchart.drawCrossPoint(point2);
-            phiLamda2 = smithchart.calLamdaFromCrossp(point2);
-            smithchart.setText(point2,QString("%1λ").arg(phiLamda2));
-            str = QString("Step 4: 将距终端负载距离转换为波长表示量%1λ，从终端负载对应的电阻圆和电抗圆的交点沿过交点的\n反射系数圆逆时针方向（向电源方向)旋转%1λ到所求输入阻抗的点（%2，%3）").arg(2*tl.getBeta()*d).arg(resPoint.x()).arg(resPoint.y());
-            resList1.append(str);
-            ++step4Base;
-            break;
-        case 4:
-            //Step 0
-            smithchart.setPainter(pPainter);
-            smithchart.drawBackground();
-            //draw Rcircle and XCircle， then draw Cross Point
-            resistor = zl.getReal()/z0;
-            x = zl.getImag()/z0;
-            smithchart.resistorCircle(resistor,Qt::red);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            smithchart.xCircle(x,Qt::red);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            //step 1
-            crossP = smithchart.getRandXCrossP(resistor,x);
-            //draw rcoef circle
-            smithchart.drawCrossPoint(crossP);
-            smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-            rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-            smithchart.rCoefCircle(rCoef,Qt::blue);
-            smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-            //Step 2
-            //draw SWR Rcircle
-            crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-            point2 = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.drawCrossPoint(point2);
-            swr = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            smithchart.setText(point2,QString("%1").arg(swr));
-            //Step 3
-            startAng = atan2(crossP.y(),crossP.x());
-            startAng = startAng/M_PI*180;
-            if(startAng<0)
-                startAng = startAng + 360;
-            point2 = smithchart.calAndDrawLineFromOrign(crossP,Qt::red);
-            smithchart.drawCrossPoint(point2);
-            phiLamda1 = smithchart.calLamdaFromCrossp(point2);
-            smithchart.setText(point2,QString("%1λ").arg(phiLamda1));
-            spanAng = 2*tl.getBeta()*d;
-            spanAng=spanAng/M_PI*180;
-            while(spanAng>=360.0)
-                spanAng = spanAng-360;
-            // -spanAngle is toward Power
-            resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-            point2 = smithchart.calAndDrawLineFromOrign(resPoint,Qt::red);
-            smithchart.drawCrossPoint(point2);
-            phiLamda2 = smithchart.calLamdaFromCrossp(point2);
-            smithchart.setText(point2,QString("%1λ").arg(phiLamda2));
-            //step 5
-            // cal the R of CrossP2
-            resistor = smithchart.calRfromCrossp(resPoint);
-            smithchart.resistorCircle(resistor,Qt::cyan);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            //cal the X of CrossP2
-            x = smithchart.calXfromCrossp(resPoint);
-            smithchart.xCircle(x,Qt::cyan);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            str = QString("Step 5: 过距终端负载距离转换为波长表示量%1λ处反射系数圆上的对应点做电阻圆和电抗圆，可以读取归一化输入阻抗为%2+j%3;").arg(2*tl.getBeta()*d).arg(resistor).arg(x);
-            resList1.append(str);
-            ++step4Base;
-            break;
-        case 5:
-            //Step 0
-            smithchart.setPainter(pPainter);
-            smithchart.drawBackground();
-            //draw Rcircle and XCircle， then draw Cross Point
-            resistor = zl.getReal()/z0;
-            x = zl.getImag()/z0;
-            smithchart.resistorCircle(resistor,Qt::red);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            smithchart.xCircle(x,Qt::red);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            //step 1
-            crossP = smithchart.getRandXCrossP(resistor,x);
-            //draw rcoef circle
-            smithchart.drawCrossPoint(crossP);
-            smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-            rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-            smithchart.rCoefCircle(rCoef,Qt::blue);
-            smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-            //Step 2
-            //draw SWR Rcircle
-            crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-            point2 = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.drawCrossPoint(point2);
-            swr = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            smithchart.setText(point2,QString("%1").arg(swr));
-            //Step 3
-            startAng = atan2(crossP.y(),crossP.x());
-            startAng = startAng/M_PI*180;
-            if(startAng<0)
-                startAng = startAng + 360;
-            point2 = smithchart.calAndDrawLineFromOrign(crossP,Qt::red);
-            smithchart.drawCrossPoint(point2);
-            phiLamda1 = smithchart.calLamdaFromCrossp(point2);
-            smithchart.setText(point2,QString("%1λ").arg(phiLamda1));
-            spanAng = 2*tl.getBeta()*d;
-            spanAng=spanAng/M_PI*180;
-            while(spanAng>=360.0)
-                spanAng = spanAng-360;
-            // -spanAngle is toward Power
-            resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-            point2 = smithchart.calAndDrawLineFromOrign(resPoint,Qt::red);
-            smithchart.drawCrossPoint(point2);
-            phiLamda2 = smithchart.calLamdaFromCrossp(point2);
-            smithchart.setText(point2,QString("%1λ").arg(phiLamda2));
-            //step 5
-            // cal the R of CrossP2
-            resistor = smithchart.calRfromCrossp(resPoint);
-            smithchart.resistorCircle(resistor,Qt::cyan);
-            point = smithchart.getRandXAxisCrossp(resistor);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(resistor));
-            //cal the X of CrossP2
-            x = smithchart.calXfromCrossp(resPoint);
-            smithchart.xCircle(x,Qt::cyan);
-            point = smithchart.getRcoefandXCrossp(1,x);
-            smithchart.drawCrossPoint(point);
-            smithchart.setText(point,QString("%1").arg(x));
-            //step 6
-            str = QString("Step 6: 乘以特性阻抗%1，则该位置输入阻抗:%2+j%3").arg(z0).arg(resistor*z0).arg(x*z0);
-            resList1.append(str);
-            step4Base = 0;
-        }
-        ui->label_BasicSmithChart->setPixmap(*pImg);
-        //显示输出结果
-        model1.setStringList(resList1);
-    }
-}
-
-void MainWindow::on_label_quanterLamdaSmithChart_doubleClicked()
-{
-    if(ui->le_z0->text().isEmpty())
-    {
-        return;
-    }
-    if(ui->le_Freq->text().isEmpty())
-    {
-        return;
-    }
-    if(ui->le_zlR->text().isEmpty())
-    {
-        return;
-    }
-    if(ui->le_zlim->text().isEmpty())
-    {
-        return;
-    }
-    double z0=ui->le_z0->text().toDouble();
-    Complex zl(ui->le_zlR->text().toDouble(),ui->le_zlim->text().toDouble());
-    double freq = ui->le_Freq->text().toDouble()*1000000;//转换成Hz
-    double v = 300000000.0;//相速
-    //TransmissionLine tl(z0,zl,v/freq);
-    lamdaDiv4 tl(z0,zl,v/freq);
-    bool ok;
-    ok = tl.calMatchParameter();
-
-    //SmithChart
-    //draw Smithchart background
-    Complex zin;
-    QPointF crossP;
-    QPointF point;
-    QPointF point2;
-    QPointF resPoint;
-    QPointF PForLamda;
-    struct CrossPoints crossP2;
-    qreal resistor;
-    qreal x;
-    qreal rCoef ;
-    qreal swr1,swr2;
-    qreal startAng;
-    qreal spanAng;
-    qreal phiLamda1,phiLamda2;
-    qreal startPhi,stopPhi1,stopPhi2;
-    qreal spanPhi;
-    qreal phiLamda;
-    bool isHalfLamda;
-    qreal z01;
-    qreal Rin;
-    QString str;
-    SmithChart smithchart(imgHeight-80,imgWidth-80);
-    switch(step4QuarnterLamda)
-    {
-    case 0:
-        if(ok)
-            str = str = QString("SmithChart做图求解全过程如下:");
-        else
-        {
-            str = QString("已匹配，毋需加入匹配枝节");
-            resList2.append(str);
-            return;
-        }
-        resList2.append(str);
-        //draw Smithchart background
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        str = QString("Step 1: 计算负载的归一化电阻和电抗值，然后在SmithChart上绘制出对应的电阻圆R=%1和电抗圆X=%2；").arg(resistor).arg(x);
-        resList2.append(str);
-        ++step4QuarnterLamda;
-        break;
-    case 1:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        str = QString("Step 2: 找到R=%1的电阻圆和X=%2电抗圆的交点，过交点做反射系数圆，并读取反射系数为%3；").arg(resistor).arg(x).arg(rCoef);
-        resList2.append(str);
-        ++step4QuarnterLamda;
-        break;
-   case 2:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        str = QString("Step 3: 找到反射系数为%1的反射系数圆和X轴的两个交点");
-        resList2.append(str);
-        ++step4QuarnterLamda;
-        break;
-    case 3:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        //Step 3
-        stopPhi1 = 0;
-        stopPhi2 = M_PI;
-        //swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-        //swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-        startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-        if(startPhi<=M_PI)
-        {
-            spanPhi = stopPhi1-startPhi;
-            isHalfLamda = false;
-        }
-        else
-        {
-            spanPhi = stopPhi2-startPhi;
-            isHalfLamda= true;
-        }
-        smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        str = QString("Step 4: 从终端负载位置沿反射系数圆图向电源方向逆时针旋转到x轴（纯电阻轴）");
-        resList2.append(str);
-        ++step4QuarnterLamda;
-        break;
-    case 4:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        //Step 3
-        stopPhi1 = 0;
-        stopPhi2 = M_PI;
-        startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-        if(startPhi<=M_PI)
-        {
-            swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr1));
-            spanPhi = stopPhi1-startPhi;
-            isHalfLamda = false;
-        }
-        else
-        {
-            swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()<crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr2));
-            spanPhi = stopPhi2-startPhi;
-            isHalfLamda= true;
-        }
-        smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        smithchart.calAndDrawArc(1,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        PForLamda = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda);
-        phiLamda = smithchart.calLamdaFromCrossp(PForLamda);
-        smithchart.setText(PForLamda,QString("%1λ").arg(phiLamda));
-        if(isHalfLamda)
-        {
-            resList2.append(QString("Step 5: 读取从终端负载旋转到0.5λ：0.5λ-%1λ=%2λ，所以1/4λ阻抗变换器加在距离终端负载ZL %3m处").arg(phiLamda).arg(0.5-phiLamda).arg((0.5-phiLamda)*tl.getLamda()));
-        }
-        else
-        {
-            resList2.append(QString("Step 5: 读取从终端负载旋转到0.25λ：0.25λ-%1λ=%1λ，所以1/4λ阻抗变换器加在距离终端负载ZL %3m处").arg(phiLamda).arg(0.25-phiLamda).arg((0.25-phiLamda)*tl.getLamda()));
-        }
-        ++step4QuarnterLamda;
-        break;
-    case 5:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        //Step 3
-        stopPhi1 = 0;
-        stopPhi2 = M_PI;
-        startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-        if(startPhi<=M_PI)
-        {
-            swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr1));
-            Rin = swr1;
-            spanPhi = stopPhi1-startPhi;
-            isHalfLamda = false;
-        }
-        else
-        {
-            swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()<crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr2));
-            Rin = swr2;
-            spanPhi = stopPhi2-startPhi;
-            isHalfLamda= true;
-        }
-        smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        smithchart.calAndDrawArc(1,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        PForLamda = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda);
-        phiLamda = smithchart.calLamdaFromCrossp(PForLamda);
-        smithchart.setText(PForLamda,QString("%1λ").arg(phiLamda));
-        //step 5
-        z01 = sqrt(Rin)*z0;
-        str = QString("Step 6: 1/4λ阻抗变换器的特性阻抗为%1Ω").arg(z01);
-        resList2.append(str);
-        step4QuarnterLamda=0;
-    }
-    ui->label_quanterLamdaSmithChart->setPixmap(*pImg);
-    //显示输出结果
-    model2.setStringList(resList2);
-}
-
-void MainWindow::on_label_SingleStubSsmithChart_doubleClicked()
-{
-    if(ui->leZ0_Series->text().isEmpty())
-    {
-        return;
-    }
-    if(ui->leFreq_Series->text().isEmpty())
-    {
-        return;
-    }
-    if(ui->leZl_real_Series->text().isEmpty())
-    {
-        return;
-    }
-    if(ui->leZl_img_Series->text().isEmpty())
-    {
-        return;
-    }
-
-    double z0=ui->leZ0_Series->text().toDouble();
-    Complex zl(ui->leZl_real_Series->text().toDouble(),ui->leZl_img_Series->text().toDouble());
-    double freq = ui->leFreq_Series->text().toDouble()*1000000;//转换成Hz
-    double v = 300000000.0;//相速
-    QString str;
-
-    //TransmissionLine tl(z0,zl,v/freq);
-    SingleStubSeriesMatching tl(z0,zl,v/freq);
-    if(ui->radio_shortStub->isChecked())
-        tl.setStubType(shortStub);
-    if(ui->radio_openStub->isChecked())
-        tl.setStubType(openStub);
-
-    struct StubMatchResult res[2];
-    bool ok;
-    ok = tl.calMatchParameter();
-    //SmithChart
-    //draw Smithchart background
-    Complex zin;
-    QPointF crossP;
-    QPointF point;
-    QPointF point2;
-    QPointF resPoint;
-    QPointF PForLamda;
-    struct CrossPoints crossP2;
-    qreal resistor;
-    qreal x;
-    qreal rCoef ;
-    qreal swr1,swr2;
-    qreal startAng;
-    qreal spanAng;
-    qreal phiLamda1,phiLamda2;
-    qreal startPhi,stopPhi1,stopPhi2;
-    qreal spanPhi;
-    qreal phiLamda;
-    bool isHalfLamda;
-    qreal z01;
-    qreal Rin;
-    SmithChart smithchart(imgHeight-80,imgWidth-80);
-    switch(step4SeriesStub[0])
-    {
-    case 0:
-        if(ok)
-        {
-                        resList3.clear();
-            str = QString("单枝节串联匹配：工作频率:%1MHz\t特性阻抗:%2Ω\t终端负载阻抗：%3+j%4(Ω)\t").arg(freq/1000000).arg(z0).arg(zl.getReal()).arg(zl.getImag());
-            resList3.append(str);
-            str = QString("/*****************************************************************************************/");
-            resList3.append(str);
-            str = QString("SmithChart做图进行单枝节串联匹配求解全过程如下:");
-            resList3.append(str);
-        }
-        else //ok is false when the Tline has been matched
-        {
-            str = QString("已匹配，毋需加入匹配枝节");
-            resList3.append(str);
-            return;
-        }
-        //draw Smithchart background
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        str = QString("Step 1: 计算负载的归一化电阻和电抗值，然后在SmithChart上绘制出对应的电阻圆R=%1和电抗圆X=%2；").arg(resistor).arg(x);
-        resList3.append(str);
-        ++step4SeriesStub[0];
-        break;
-    case 1:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        str = QString("Step 2: 找到R=%1的电阻圆和X=%2电抗圆的交点，过交点做反射系数圆，并读取反射系数为%3；").arg(resistor).arg(x).arg(rCoef);
-        resList3.append(str);
-        ++step4SeriesStub[0];
-        break;
-   case 2:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        str = QString("Step 3: 找到反射系数为%1的反射系数圆和X轴的两个交点");
-        resList3.append(str);
-        ++step4SeriesStub[0];
-        break;
-    case 3:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        //Step 3
-        stopPhi1 = 0;
-        stopPhi2 = M_PI;
-        //swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-        //swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-        startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-        if(startPhi<=M_PI)
-        {
-            spanPhi = stopPhi1-startPhi;
-            isHalfLamda = false;
-        }
-        else
-        {
-            spanPhi = stopPhi2-startPhi;
-            isHalfLamda= true;
-        }
-        smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        str = QString("Step 4: 从终端负载位置沿反射系数圆图向电源方向逆时针旋转到x轴（纯电阻轴）");
-        resList3.append(str);
-        ++step4SeriesStub[0];
-        break;
-    case 4:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        //Step 3
-        stopPhi1 = 0;
-        stopPhi2 = M_PI;
-        startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-        if(startPhi<=M_PI)
-        {
-            swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr1));
-            spanPhi = stopPhi1-startPhi;
-            isHalfLamda = false;
-        }
-        else
-        {
-            swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()<crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr2));
-            spanPhi = stopPhi2-startPhi;
-            isHalfLamda= true;
-        }
-        smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        smithchart.calAndDrawArc(1,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        PForLamda = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda);
-        phiLamda = smithchart.calLamdaFromCrossp(PForLamda);
-        smithchart.setText(PForLamda,QString("%1λ").arg(phiLamda));
-        if(isHalfLamda)
-        {
-            resList3.append(QString("Step 5: 读取从终端负载旋转到0.5λ：0.5λ-%1λ=%2λ，所以串联单枝节加在距离终端负载ZL %3m处").arg(phiLamda).arg(0.5-phiLamda).arg((0.5-phiLamda)*tl.getLamda()));
-        }
-        else
-        {
-            resList3.append(QString("Step 5: 读取从终端负载旋转到0.25λ：0.25λ-%1λ=%1λ，所以串联单枝节加在距离终端负载ZL %3m处").arg(phiLamda).arg(0.25-phiLamda).arg((0.25-phiLamda)*tl.getLamda()));
-        }
-        ++step4SeriesStub[0];
-        break;
-    case 5:
-        //Step 0
-        smithchart.setPainter(pPainter);
-        smithchart.drawBackground();
-        //draw Rcircle and XCircle， then draw Cross Point
-        resistor = zl.getReal()/z0;
-        x = zl.getImag()/z0;
-        smithchart.resistorCircle(resistor,Qt::red);
-        point = smithchart.getRandXAxisCrossp(resistor);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(resistor));
-        smithchart.xCircle(x,Qt::red);
-        point = smithchart.getRcoefandXCrossp(1,x);
-        smithchart.drawCrossPoint(point);
-        smithchart.setText(point,QString("%1").arg(x));
-        //step 1
-        crossP = smithchart.getRandXCrossP(resistor,x);
-        //draw rcoef circle
-        smithchart.drawCrossPoint(crossP);
-        smithchart.setText(crossP,QString("(%1,%2)").arg(crossP.x()).arg(crossP.y()));
-        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-        smithchart.rCoefCircle(rCoef,Qt::blue);
-        smithchart.setText(QPointF(0,rCoef),QString("%1").arg(rCoef));
-        //Step 2
-        crossP2 = smithchart.getRcoefandXAxisCrossp(rCoef);
-        smithchart.drawCrossPoint(crossP2.crossP[0]);
-        smithchart.drawCrossPoint(crossP2.crossP[1]);
-        //Step 3
-        stopPhi1 = 0;
-        stopPhi2 = M_PI;
-        startPhi =smithchart.getRcoefPhiFromCrossp(crossP);
-        if(startPhi<=M_PI)
-        {
-            swr1 = smithchart.CalAndDrawSwrCircle(rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()>crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr1));
-            Rin = swr1;
-            spanPhi = stopPhi1-startPhi;
-            isHalfLamda = false;
-        }
-        else
-        {
-            swr2 = smithchart.CalAndDrawSwrCircle(-rCoef,Qt::darkMagenta);
-            point = crossP2.crossP[0].x()<crossP2.crossP[1].x()?crossP2.crossP[0]:crossP2.crossP[1];
-            smithchart.setText(point,QString("%1").arg(swr2));
-            Rin = swr2;
-            spanPhi = stopPhi2-startPhi;
-            isHalfLamda= true;
-        }
-        smithchart.calAndDrawArc(rCoef,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        smithchart.calAndDrawArc(1,startPhi/M_PI*180,spanPhi/M_PI*180,Qt::black);
-        PForLamda = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-        smithchart.drawCrossPoint(PForLamda);
-        phiLamda = smithchart.calLamdaFromCrossp(PForLamda);
-        smithchart.setText(PForLamda,QString("%1λ").arg(phiLamda));
-        //step 5
-
-        resList3.append(str);
-        ++step4SeriesStub[0];
-    default:
-        step4SeriesStub[0]=0;
-    }
-//    if(!ok)//ok is false when the Tline has been matched
-//    {
-//        str = QString("已匹配，毋需利用smith圆图进行串联单枝节匹配");
-//        resList3.append(str);
-//        return;
-//    }
-//    if(ok)
-//    {
-
-//        //draw Smithchart background
-//        SmithChart smithchart(imgHeight-80,imgWidth-80);
-//        smithchart.setPainter(pPainter);
-//        smithchart.drawBackground();
-//        //draw Rcircle and XCircle， then draw Cross Point
-//        qreal resistor = zl.getReal()/z0;
-//        qreal x = zl.getImag()/z0;
-//        QPointF crossP = smithchart.getRandXCrossP(resistor,x);
-//        QPointF point;
-//        smithchart.resistorCircle(resistor,Qt::red);
-//        point = smithchart.getRandXAxisCrossp(resistor);
-//        smithchart.drawCrossPoint(point);
-//        smithchart.xCircle(x,Qt::red);
-//        point = smithchart.getRcoefandXCrossp(1,x);
-//        smithchart.drawCrossPoint(point);
-//        //draw rcoef circle
-//        smithchart.drawCrossPoint(crossP);
-//        qreal rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-//        smithchart.rCoefCircle(rCoef,Qt::blue);
-//        //draw match Rcircle and Count crossPoint;
-//        struct CrossPoints crossP2;
-//        smithchart.resistorCircle(1,Qt::cyan);
-//        crossP2 = smithchart.getRcoefandRCrossP(rCoef,1);
-//        for(int i=0;i<crossP2.nPoints;++i)
-//        {
-//            smithchart.drawCrossPoint(crossP2.crossP[i]);
-//        }
-//        // from CrossP to crossP2.crossP[0]
-//        qreal startAng = atan2(crossP.y(),crossP.x());
-//        startAng = startAng/M_PI*180;
-//        if(startAng<0)
-//            startAng = startAng + 360;
-//        qreal stopAng = atan2(crossP2.crossP[0].y(),crossP2.crossP[0].x());
-//        stopAng = stopAng/M_PI*180;
-//        if(stopAng<0)
-//            stopAng = stopAng +360;
-//        qreal spanAng = stopAng-startAng;
-//        if(spanAng<0)
-//            spanAng = -spanAng;
-//        // -spanAngle is toward Power
-//        QPointF resPoint;
-//        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-//        //cal and draw the position of stub
-//        QPointF PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-//        smithchart.drawCrossPoint(PForLamda1);
-//        qreal phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-//        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-//        QPointF PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[0],Qt::darkBlue);
-//        smithchart.drawCrossPoint(PForLamda2);
-//        qreal phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-//        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-//        //cal and draw x circle
-//        qreal x1 = smithchart.calXfromCrossp(crossP2.crossP[0]);
-//        smithchart.xCircle(x1,Qt::blue);
-//        QPointF x1Point = smithchart.getRcoefandXCrossp(1,x1);
-//        smithchart.drawCrossPoint(x1Point);
-//        smithchart.setText(x1Point,QString("%1").arg(x1));
-//        qreal x2 = -x1;
-//        smithchart.xCircle(x2,Qt::blue);
-//        QPointF x2Point = smithchart.getRcoefandXCrossp(1,x2);
-//        smithchart.calAndDrawLineFromOrign(x2Point,Qt::darkBlue);
-//        smithchart.drawCrossPoint(x2Point);
-//        //smithchart.setText(x2Point,QString("%1").arg(x2));
-//        qreal posLamda1 = smithchart.calLamdaFromCrossp(x2Point);
-//        smithchart.setText(x2Point,QString("%1λ").arg(posLamda1));
-//        qreal stubPos1,stubPos2;
-//        qreal stubLen1=0,stubLen2=0;
-
-//        if(ui->radio_shortStub->isChecked())
-//        {
-//            smithchart.drawShortPoint();
-//            startAng = 180;
-//            stopAng = atan2(x2Point.y(),x2Point.x());
-//            stopAng = stopAng/M_PI*180;
-//            qreal spanAng;
-//            if(stopAng<0)
-//                spanAng = 180-stopAng;
-//            else
-//                spanAng = stopAng-startAng;
-//            if(spanAng<0)
-//                spanAng = -spanAng;
-//            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-//            if(phiLamda1>phiLamda2)
-//            {
-//                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-//            }
-//            else
-//            {
-//                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-//            }
-//            stubLen1 = posLamda1*v/freq;
-//        }
-//        else
-//        {
-//            smithchart.drawOpenPoint();
-//            startAng = 0;
-//            stopAng = atan2(x2Point.y(),x2Point.x());
-//            stopAng = stopAng/M_PI*180;
-//            qreal spanAng;
-//            if(stopAng<0)
-//                spanAng = -stopAng;
-//            else
-//                spanAng = 360-stopAng;
-//            if(spanAng<0)
-//                spanAng = -spanAng;
-//            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-//            if(phiLamda1>phiLamda2)
-//            {
-//                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-//            }
-//            else
-//            {
-//                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-//            }
-//            if(posLamda1>0.25)
-//                stubLen1 = (posLamda1-0.25)*v/freq;
-//            else
-//                stubLen1 = (posLamda1+0.25)*v/freq;
-//        }
-//        str = QString("Result 1: Pos l1=%1m\t stub l2=%2m").arg(stubPos1).arg(stubLen1);
-//        resList3.append(str);
-
-//        ui->label_SingleStubSsmithChart->setPixmap(*pImg);
-//        /* ******************************
-//         * the second resolution        *
-//         * ******************************/
-//        smithchart.drawBackground();
-//        //draw Rcircle and XCircle， then draw Cross Point
-//        resistor = zl.getReal()/z0;
-//        x = zl.getImag()/z0;
-//        crossP = smithchart.getRandXCrossP(resistor,x);
-//        smithchart.resistorCircle(resistor,Qt::red);
-//        point = smithchart.getRandXAxisCrossp(resistor);
-//        smithchart.drawCrossPoint(point);
-//        smithchart.xCircle(x,Qt::red);
-//        point = smithchart.getRcoefandXCrossp(1,x);
-//        smithchart.drawCrossPoint(point);
-//        //draw rcoef circle
-//        smithchart.drawCrossPoint(crossP);
-//        rCoef = sqrt(crossP.x()*crossP.x()+crossP.y()*crossP.y());
-//        smithchart.rCoefCircle(rCoef,Qt::blue);
-//        //draw match Rcircle and Count crossPoint;
-//        smithchart.resistorCircle(1,Qt::cyan);
-//        crossP2 = smithchart.getRcoefandRCrossP(rCoef,1);
-//        for(int i=0;i<crossP2.nPoints;++i)
-//        {
-//            smithchart.drawCrossPoint(crossP2.crossP[i]);
-//        }
-//        // from CrossP to crossP2.crossP[1]
-//        startAng = atan2(crossP.y(),crossP.x());
-//        startAng = startAng/M_PI*180;
-//        if(startAng<0)
-//            startAng = startAng + 360;
-//        stopAng = atan2(crossP2.crossP[1].y(),crossP2.crossP[1].x());
-//        stopAng = stopAng/M_PI*180;
-//        if(stopAng<0)
-//            stopAng = stopAng +360;
-//        spanAng = stopAng-startAng;
-//        if(spanAng<0)
-//            spanAng = -spanAng;
-//        else
-//            spanAng = 360-spanAng;
-//        // -spanAngle is toward Power
-//        resPoint = smithchart.calAndDrawArc(rCoef,startAng,-spanAng,Qt::green);
-//        //cal and draw the position of stub
-//        PForLamda1 = smithchart.calAndDrawLineFromOrign(crossP,Qt::darkBlue);
-//        smithchart.drawCrossPoint(PForLamda1);
-//        phiLamda1 = smithchart.calLamdaFromCrossp(PForLamda1);
-//        smithchart.setText(PForLamda1,QString("%1λ").arg(phiLamda1));
-//        PForLamda2 = smithchart.calAndDrawLineFromOrign(crossP2.crossP[1],Qt::darkBlue);
-//        smithchart.drawCrossPoint(PForLamda2);
-//        phiLamda2 = smithchart.calLamdaFromCrossp(PForLamda2);
-//        smithchart.setText(PForLamda2,QString("%1λ").arg(phiLamda2));
-//        //cal and draw x circle
-//        x1 = smithchart.calXfromCrossp(crossP2.crossP[1]);
-//        smithchart.xCircle(x1,Qt::blue);
-//        x1Point = smithchart.getRcoefandXCrossp(1,x1);
-//        smithchart.drawCrossPoint(x1Point);
-//        smithchart.setText(x1Point,QString("%1").arg(x1));
-//        x2 = -x1;
-//        smithchart.xCircle(x2,Qt::blue);
-//        x2Point = smithchart.getRcoefandXCrossp(1,x2);
-//        smithchart.calAndDrawLineFromOrign(x2Point,Qt::darkBlue);
-//        smithchart.drawCrossPoint(x2Point);
-//        //smithchart.setText(x2Point,QString("%1").arg(x2));
-//        posLamda1 = smithchart.calLamdaFromCrossp(x2Point);
-//        smithchart.setText(x2Point,QString("%1λ").arg(posLamda1));
-//        if(ui->radio_shortStub->isChecked())
-//        {
-//            smithchart.drawShortPoint();
-//            startAng = 180;
-//            stopAng = atan2(x2Point.y(),x2Point.x());
-//            stopAng = stopAng/M_PI*180;
-//            qreal spanAng;
-//            if(stopAng<0)
-//                spanAng = 180-stopAng;
-//            else
-//                spanAng = stopAng-startAng;
-//            if(spanAng<0)
-//                spanAng = -spanAng;
-//            else
-//                spanAng = 360-spanAng;
-//            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-//            if(phiLamda1>phiLamda2)
-//            {
-//                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-//            }
-//            else
-//            {
-//                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-//            }
-//            stubLen1 = posLamda1*v/freq;
-//        }
-//        else
-//        {
-//            smithchart.drawOpenPoint();
-//            startAng = 0;
-//            stopAng = atan2(x2Point.y(),x2Point.x());
-//            stopAng = stopAng/M_PI*180;
-//            qreal spanAng;
-//            if(stopAng<0)
-//                spanAng = -stopAng;
-//            else
-//                spanAng = 360-stopAng;
-//            if(spanAng<0)
-//                spanAng = -spanAng;
-//            resPoint = smithchart.calAndDrawArc(1,startAng,-spanAng,Qt::green);
-//            if(phiLamda1>phiLamda2)
-//            {
-//                stubPos1 =(0.5- (phiLamda1-phiLamda2))*v/freq;
-//            }
-//            else
-//            {
-//                stubPos1 = (phiLamda2-phiLamda1)*v/freq;
-//            }
-//            if(posLamda1>0.25)
-//                stubLen1 = (posLamda1-0.25)*v/freq;
-//            else
-//                stubLen1 = (posLamda1+0.25)*v/freq;
-//        }
-//        str = QString("Result 2: Pos l1=%1m\t stub l2=%2m").arg(stubPos1).arg(stubLen1);
-//        resList3.append(str);
-//        ui->label_SingleStubSsmithChart_2->setPixmap(*pImg);
-//    }
-    ui->label_SingleStubSsmithChart->setPixmap(*pImg);
-    model3.setStringList(resList3);
 }

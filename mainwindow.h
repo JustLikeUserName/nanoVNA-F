@@ -60,6 +60,8 @@ private slots:
 
     void on_pbLoadData_clicked();
 
+    void on_pbSaveUIImage_clicked();
+
 private:
     void setSelfValidator();
     void availableSerialDevice();
